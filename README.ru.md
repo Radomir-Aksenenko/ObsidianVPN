@@ -2,17 +2,32 @@
 
 # Протокол Obsidian VPN (v2)
 
-Сетевой транспортный протокол третьего уровня (L3) для стабильной связи в условиях жесткого DPI и блокировок по белым спискам. Защищает поток рандомизацией диапазонов типов пакетов (Range IDs), составными сигнатурами CPS, маскировкой под чужой TLS (REALITY) и многопоточным безблокировочным UDP-конвейером.
+Высокопроизводительный антицензурный сетевой транспортный протокол третьего уровня (L3) со случайными диапазонами заголовков (Range IDs), составными сигнатурами CPS, маскировкой TLS 1.3 REALITY, многопоточным UDP-конвейером и встраиваемым кроссплатформенным SDK для создателей клиентских приложений.
 
-Статус: бета-версия / открытая спецификация и рабочая реализация на Go
+Статус: бета-версия / открытая спецификация и эталонная реализация на Go
 
 ---
 
 ## Обзор
 
-Obsidian работает на третьем сетевом уровне (L3). Протокол спроектирован для обхода современных комплексов глубокого анализа пакетов (DPI, включая ТСПУ), отбивает активное зондирование (active probing) и проходит через белые списки протоколов.
+Obsidian работает на третьем сетевом уровне (L3). Протокол спроектирован для надежного обхода современных комплексов глубокого анализа пакетов (DPI, включая ТСПУ), предотвращения активного зондирования (active probing) и преодоления белых списков протоколов.
 
-Обычные прокси (VLESS, Shadowsocks, Trojan) работают на прикладном уровне с отдельными TCP/SOCKS5-сессиями. Obsidian идет другим путем: поднимает виртуальный сетевой интерфейс (TUN). Получается прямой L3 IP-туннель с высокой скоростью (350+ Мбит/с) и минимальной задержкой. При этом UDP-трафик (онлайн-игры, видеоконференции, стриминг) передается нативно, без эффекта TCP-over-TCP.
+В отличие от прикладных прокси (VLESS, Shadowsocks, Trojan), Obsidian создает полноценный виртуальный сетевой интерфейс (TUN). Формируется прямой L3 IP-туннель с высокой скоростью (350+ Мбит/с), минимальной задержкой и нативной передачей UDP без деградации TCP-over-TCP.
+
+Ядро протокола разработано с учетом легкого встраивания в сторонние клиентские приложения для **iOS**, **Android**, **Linux**, **macOS** и **Windows**.
+
+---
+
+## Поддерживаемые платформы
+
+| Платформа | Механизм туннеля | Способ интеграции | Статус |
+|:---|:---|:---|:---|
+| **Android** | `VpnService` (`ParcelFileDescriptor`) | Go Mobile SDK (`.aar`) или C-ABI (`.so`) | Поддерживается (`[OK]`) |
+| **iOS** | `NetworkExtension` (`packetFlow`) | Go Mobile SDK (`.xcframework`) или C-ABI | Поддерживается (`[OK]`) |
+| **Linux** | Нативный `/dev/net/tun` (`IFF_TUN`) | Автономный CLI или Go-пакет `obsidian/client` | Поддерживается (`[OK]`) |
+| **macOS** | Нативный `utun` (`com.apple.net.utun_control`) | Автономный CLI, Go-пакет или `.xcframework` | Поддерживается (`[OK]`) |
+| **Windows** | Драйвер Wintun | Автономный CLI или Go-пакет | Поддерживается (`[OK]`) |
+| **Flutter / React Native** | FFI-привязки или локальный SOCKS5 | C-ABI `bindings/c/obsidian.h` (`dart:ffi`) | Поддерживается (`[OK]`) |
 
 ---
 
@@ -36,7 +51,7 @@ Obsidian работает на третьем сетевом уровне (L3). 
             ▼                ▼
 [ Управляющий канал и TCP ]  [ Скоростной UDP-конвейер ]
 - Маскировка REALITY TLS 1.3 - Многопоточный Lock-Free конвейер
-  (ретрансляция ClientHello) - Пул сокетов и port hopping
+  (ретрансляция ClientHello) - Динамический port hopping и пул портов
 - CPS-сигнатуры              - Фоновый шум и тайминг-джиттер
   (мимикрия под DNS/QUIC)    - Защита от статистического анализа
 ```
@@ -68,9 +83,35 @@ Obsidian работает на третьем сетевом уровне (L3). 
 
 ---
 
+## SDK для разработчиков клиентских приложений
+
+Для разработчиков клиентов предоставляется официальный встраиваемый SDK. Полное руководство с примерами кода на Kotlin и Swift доступно в [docs/CLIENT_INTEGRATION.md](docs/CLIENT_INTEGRATION.md).
+
+### 1. Go Mobile SDK (`pkg/mobile`)
+Пакет оптимизирован для `gomobile bind` и генерирует нативные библиотеки `.aar` (Android) и `.xcframework` (iOS/macOS):
+- `StartTunnelWithFd`: передача файлового дескриптора Android `VpnService` напрямую в ядро Go.
+- `StartPacketTunnel`: передача IP-пакетов в оперативной памяти для цикла `packetFlow` в `NEPacketTunnelProvider` на iOS.
+- `SocketProtector`: механизм вызова `VpnService.protect(fd)` перед установкой соединений, предотвращающий петли маршрутизации.
+- `StartLocalProxy` / `StopLocalProxy`: запуск локального SOCKS5-прокси (`127.0.0.1:10808`).
+
+### 2. C-ABI (`bindings/c`)
+Универсальный C-заголовок [bindings/c/obsidian.h](bindings/c/obsidian.h) и динамическая библиотека (`.so`, `.dylib`, `.dll`) для прямого вызова из:
+- Flutter (через `dart:ffi`)
+- React Native (через TurboModules или JNI)
+- Rust, C++, C#, Python
+
+### 3. Кроссплатформенный TUN (`obsidian/tun`)
+Абстракция виртуального сетевого адаптера для всех ОС:
+- Linux: `/dev/net/tun` (`IFF_TUN | IFF_NO_PI`)
+- macOS: `utun` (`com.apple.net.utun_control`)
+- Windows: Wintun
+- Универсальный: `OpenFD` для готовых системных дескрипторов
+
+---
+
 ## Спецификация URI Obsidian
 
-Для легкого обмена настройками серверов, интеграции в сторонние клиенты и будущей поддержки подписок протокол использует единый формат ссылок.
+Для легкого обмена настройками серверов, интеграции в сторонние клиенты и поддержки подписок протокол использует единый формат ссылок.
 
 ### Формат ссылки
 
@@ -85,7 +126,7 @@ obsidian://<server_public_key>@<server_host>:<server_port>?[параметры]#
 ### Параметры строки запроса
 
 | Параметр | Тип | Назначение | Значение по умолчанию |
-|----------|-----|------------|-----------------------|
+|:---|:---|:---|:---|
 | `udp_port` | integer | Порт скоростного UDP-канала данных | Равен `server_port` |
 | `udp_data` | `0` или `1` | Использование ускоренного UDP-канала | `1` |
 | `security` | string | Режим маскировки (`reality` или `none`) | `reality` |
@@ -111,65 +152,36 @@ obsidian://<server_public_key>@<server_host>:<server_port>?[параметры]#
 obsidian://170a2fec63c53e4a0c6c866d9d08a3304602b3a9090101765af292a469ac1f27@198.51.100.1:8443?security=reality&sni=www.microsoft.com&auth_key=d859d03517492c93bbdf73a10bc10cf1&udp_port=8443#Frankfurt-01
 ```
 
-### Архитектура подписок
-Сервер подписки отдает конфигурацию в одном из двух видов:
-1. Обычный текст со списком ссылок `obsidian://` (по одной на строку);
-2. Тот же текстовый список, закодированный в Base64.
-
----
-
-## Интеграция в сторонние клиенты
-
-Ядро Obsidian написано на чистом Go без зависимостей от CGO. Библиотеку можно подключать напрямую в Go-приложения, запускать отдельным демоном или компилировать в c-shared библиотеку (.so / .dll / .dylib) для интеграции в клиенты на Rust, Swift, C# или Java/Kotlin.
-
-### Использование пакета на Go
-
-```go
-package main
-
-import (
-    "log"
-    "obsidian/obsidian"
-)
-
-func main() {
-    uri := "obsidian://<pubkey>@198.51.100.1:8443?security=reality&sni=www.microsoft.com#Node"
-    
-    // 1. Разбор ссылки в структуру конфигурации
-    cfg, err := obsidian.ParseURI(uri)
-    if err != nil {
-        log.Fatalf("ошибка разбора URI: %v", err)
-    }
-
-    // 2. Генерация или загрузка клиентской пары ключей
-    clientKeys, _ := obsidian.GenerateKeypair()
-
-    // 3. Подключение и старт защищенной сессии
-    log.Printf("Подключение к %s:%s через профиль %s...", cfg.ServerHost, cfg.ServerPort, cfg.Profile)
-}
-```
-
 ---
 
 ## Структура репозитория
 
 ```
 .
+├── bindings/             # C-ABI и заголовочные файлы для сторонних клиентов
+│   ├── c/obsidian.h      # Декларации C-функций
+│   └── c/obsidian_c.go   # Экспортируемые CGO-функции
+├── cmd/
+│   ├── server/           # Демон VPN-сервера (TUN, DNS, маршрутизация)
+│   ├── client/           # Эталонный кроссплатформенный CLI-клиент
+│   └── probe/            # Утилита для тестов и симуляции DPI-зондов
+├── docs/                 # Архитектурная документация и руководства
+│   ├── CLIENT_INTEGRATION.md # Руководство для iOS, Android, Linux, macOS
+│   └── ...
 ├── obsidian/             # Ядро протокола на Go
+│   ├── client/           # Переиспользуемый движок сессий и SOCKS5-прокси
+│   ├── tun/              # Кроссплатформенный TUN-драйвер (Linux, macOS, Windows, FD)
 │   ├── protocol.go       # Фрейминг Wire v2, Range-based Type IDs, упаковка пакетов
 │   ├── handshake.go      # Авторизация и машина состояний рукопожатия
 │   ├── reality.go        # Логика REALITY TLS 1.3 и перенаправление зондов
 │   ├── obfuscation.go    # Генерация шума, паддинг, тайминг-джиттер
-│   ├── transport.go      # Менеджер TCP-сессий и сетевые диалеры
+│   ├── transport.go      # Менеджер TCP-сессий, защита сокетов SocketProtector
 │   ├── udp.go            # Высокоскоростной безблокировочный UDP-конвейер
 │   ├── uri.go            # Кодек и парсер ссылок obsidian:// и vpn://
 │   ├── cps.go            # Парсер составных сигнатур CPS
 │   └── crypto.go         # Криптографические примитивы (ChaCha20-Poly1305, X25519)
-├── cmd/
-│   ├── server/           # Демон VPN-сервера (TUN, DNS, маршрутизация)
-│   ├── client/           # Эталонный CLI-клиент и фоновый сервис
-│   └── probe/            # Утилита для тестов и симуляции DPI-зондов
-├── docs/                 # Архитектурная документация и спецификации
+├── pkg/
+│   └── mobile/           # Go Mobile SDK для Android (.aar) и iOS (.xcframework)
 ├── examples/             # Шаблоны конфигурационных файлов без секретов
 ├── go.mod
 ├── LICENSE
@@ -185,7 +197,7 @@ func main() {
 - Linux (для сервера TUN: утилиты `iproute2`, `iptables` или `nftables`)
 - Windows / macOS / Linux (для клиента)
 
-### Компиляция сервера и клиента
+### Сборка CLI-клиента и сервера
 
 ```bash
 # Сборка сервера (Linux)
@@ -195,23 +207,27 @@ go build -o bin/obsidian-server ./cmd/server
 go build -o bin/obsidian-client ./cmd/client
 ```
 
-### Запуск
+### Сборка Mobile SDK
 
-#### Сервер
 ```bash
-sudo ./bin/obsidian-server --config examples/server.example.json
+# Android AAR (требуется gomobile)
+gomobile bind -target=android -androidapi=21 -o obsidian.aar ./pkg/mobile
+
+# iOS XCFramework (требуется gomobile и macOS)
+gomobile bind -target=ios,iossimulator -o Obsidian.xcframework ./pkg/mobile
 ```
 
-#### Клиент
+### Сборка C-Shared библиотек
+
 ```bash
-# Прямое подключение по ссылке:
-sudo ./bin/obsidian-client --uri "obsidian://<key>@<host>:8443?security=reality&sni=www.microsoft.com#Beta"
+# Linux
+go build -buildmode=c-shared -o libobsidian.so ./bindings/c
 
-# Либо подключение через файл конфигурации:
-sudo ./bin/obsidian-client --config examples/client.example.json
+# macOS
+go build -buildmode=c-shared -o libobsidian.dylib ./bindings/c
 
-# Экспорт существующего JSON в ссылку:
-./bin/obsidian-client --config config.json --to-uri --label "MyServer"
+# Windows
+go build -buildmode=c-shared -o obsidian.dll ./bindings/c
 ```
 
 ---
