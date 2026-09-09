@@ -1,3 +1,5 @@
+[Читать на русском](README.ru.md) | **English**
+
 # Obsidian VPN Protocol (v2)
 
 High-Performance Anti-Censorship Layer-3 Transport Protocol with Range-Based Framing, CPS Signatures, REALITY TLS Camouflage, and UDP Multiplexing.
