@@ -1,0 +1,25 @@
+{
+  "host": "0.0.0.0",
+  "port": "8443",
+  "protocol_version": 2,
+  "tun_interface": "tun0",
+  "tun_address": "10.8.0.1/24",
+  "mtu": 1420,
+  "server_private_key": "0000000000000000000000000000000000000000000000000000000000000002",
+  "server_public_key": "0000000000000000000000000000000000000000000000000000000000000001",
+  "udp_port": "8443",
+  "enable_udp_data": true,
+  "udp_socket_buffer_mb": 16,
+  "junk_count": 7,
+  "junk_min": 50,
+  "junk_max": 1000,
+  "noise_min_sec": 10,
+  "noise_max_sec": 40,
+  "keepalive_sec": 20,
+  "profile": "fast-secure",
+  "jitter": "off",
+  "signatures": [
+    "<b 0xc00000000108><rc 8><b 0x08><rc 8><b 0x0044b000000001><r 1170>",
+    "<r 2><b 0x010000010000000000010377777706676f6f676c6503636f6d00000100010000291000000000000000>"
+  ]
+}

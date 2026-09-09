@@ -1,0 +1,54 @@
+# Compiled binaries
+*.exe
+*.dll
+*.so
+*.dylib
+bin/
+build/
+build_cli/
+build_gui/
+dist/
+dist_cli/
+dist_gui/
+obsidian-server
+obsidian-server-linux
+test-server-linux
+test_*
+ObsidianAdmin*
+ObsidianVPN*
+wintun.dll
+
+# Private GUI repository (moved to ObsidianVPN-Desktop)
+desktop/
+build-gui.bat
+docs/ui-prompts.md
+
+# Media and screenshots
+screenshots/
+*.png
+*.jpg
+*.jpeg
+
+# Local configurations and sensitive files
+obsidian-client.json
+obsidian-server.json
+client.json
+server.json
+keys.json
+revoked_clients.json
+*.key
+*.pem
+*.id_rsa
+*.bundle
+
+# Machine Learning and Testbed dumps
+tools/tspu_testbed/__pycache__/
+*.pt
+*.tmp
+*.log
+
+# IDE & Editor files
+.idea/
+.vscode/
+*.swp
+*~

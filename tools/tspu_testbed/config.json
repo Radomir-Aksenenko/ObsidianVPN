@@ -1,0 +1,26 @@
+{
+  "traffic": {
+    "num_train_flows_per_class": 120,
+    "num_test_flows_per_class": 40,
+    "packets_per_flow": 30
+  },
+  "obsidian": {
+    "bucket_sizes": [128, 256, 512, 1024, 1360],
+    "max_trailer": 64,
+    "stun_magic_cookie": "0x2112A442",
+    "enable_dynamic_magic": true,
+    "mtu": 1420
+  },
+  "tspu_rules": {
+    "block_wireguard_signatures": true,
+    "strict_stun_rfc_check": true,
+    "entropy_threshold": 7.85,
+    "vpn_probability_threshold": 0.65
+  },
+  "model": {
+    "epochs": 15,
+    "batch_size": 32,
+    "learning_rate": 0.002,
+    "weights_path": "tools/tspu_testbed/tspu_model.pt"
+  }
+}

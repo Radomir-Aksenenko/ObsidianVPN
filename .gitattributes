@@ -1,0 +1,18 @@
+# Normalize repository text files to LF to avoid CRLF-only diffs on Windows.
+* text=auto eol=lf
+
+# Windows scripts can keep CRLF if added later.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary artifacts.
+*.exe binary
+*.dll binary
+*.so binary
+*.dylib binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary

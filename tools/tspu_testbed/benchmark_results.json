@@ -1,0 +1,27 @@
+{
+  "scenario_1_real_world": {
+    "Legitimate_WebRTC": {
+      "passed": 40,
+      "blocked": 0,
+      "evasion": 100.0
+    },
+    "Unobfuscated_WireGuard": {
+      "passed": 0,
+      "blocked": 40,
+      "evasion": 0.0
+    },
+    "ObsidianVPN_Tunnel": {
+      "passed": 27,
+      "blocked": 13,
+      "evasion": 67.5
+    },
+    "Standard_HTTPS": {
+      "passed": 4,
+      "blocked": 36,
+      "evasion": 10.0
+    }
+  },
+  "scenario_2_targeted_accuracy": 1.0,
+  "device": "cuda",
+  "pytorch_version": "2.13.0+cu130"
+}

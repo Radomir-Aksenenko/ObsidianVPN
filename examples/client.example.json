@@ -1,0 +1,29 @@
+{
+  "server_host": "198.51.100.1",
+  "server_port": "8443",
+  "protocol_version": 2,
+  "server_public_key": "0000000000000000000000000000000000000000000000000000000000000001",
+  "client_private_key": "",
+  "reality_enabled": true,
+  "reality_sni": "www.microsoft.com",
+  "reality_auth_key": "00000000000000000000000000000001",
+  "fingerprint": "chrome",
+  "tun_address": "10.8.0.2/24",
+  "dns": "1.1.1.1",
+  "mtu": 1420,
+  "route_ips": [],
+  "udp_port": "8443",
+  "enable_udp_data": true,
+  "junk_count": 7,
+  "junk_min": 50,
+  "junk_max": 1000,
+  "noise_min_sec": 10,
+  "noise_max_sec": 40,
+  "keepalive_sec": 20,
+  "profile": "fast-secure",
+  "jitter": "off",
+  "signatures": [
+    "<b 0xc00000000108><rc 8><b 0x08><rc 8><b 0x0044b000000001><r 1170>",
+    "<r 2><b 0x010000010000000000010377777706676f6f676c6503636f6d00000100010000291000000000000000>"
+  ]
+}
