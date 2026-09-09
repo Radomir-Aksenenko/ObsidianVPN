@@ -12,6 +12,8 @@ dist_cli/
 dist_gui/
 obsidian-server
 obsidian-server-linux
+/obsidian-client
+/client
 test-server-linux
 test_*
 ObsidianAdmin*

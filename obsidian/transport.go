@@ -35,6 +35,7 @@ import (
 	"math/big"
 	"math/rand/v2"
 	"net"
+	"syscall"
 	"time"
 
 	utls "github.com/refraction-networking/utls"
@@ -148,6 +149,10 @@ func GenerateSelfSignedCertificate(hosts ...string) (tls.Certificate, error) {
 
 // ── uTLS Client ───────────────────────────────────────────────────────────────
 
+// SocketProtector is called with a raw socket file descriptor before the socket connects.
+// This is essential on Android (VpnService.protect) and other environments to prevent routing loops.
+type SocketProtector func(fd int) error
+
 type ClientTransportConfig struct {
 	ServerHost      string
 	ServerPort      string
@@ -158,6 +163,30 @@ type ClientTransportConfig struct {
 	Fingerprint     *utls.ClientHelloID
 	RealityEnabled  bool
 	RealityAuthKey  []byte // Pre-shared authentication key for REALITY SessionID HMAC
+	SocketProtector SocketProtector
+	Dialer          *net.Dialer
+}
+
+func createClientDialer(cfg ClientTransportConfig, timeout time.Duration) *net.Dialer {
+	if cfg.Dialer != nil {
+		return cfg.Dialer
+	}
+	d := &net.Dialer{
+		Timeout: timeout,
+	}
+	if cfg.SocketProtector != nil {
+		d.Control = func(network, address string, c syscall.RawConn) error {
+			var protectErr error
+			err := c.Control(func(fd uintptr) {
+				protectErr = cfg.SocketProtector(int(fd))
+			})
+			if err != nil {
+				return err
+			}
+			return protectErr
+		}
+	}
+	return d
 }
 
 // BuildTLSClientHelloRecord builds a TLS 1.3 ClientHello record with modern uTLS fingerprinting
@@ -228,7 +257,8 @@ func DialObsidianREALITY(cfg ClientTransportConfig) (net.Conn, error) {
 	}
 
 	addr := net.JoinHostPort(cfg.ServerHost, cfg.ServerPort)
-	rawConn, err := net.Dial("tcp", addr)
+	dialer := createClientDialer(cfg, 5*time.Second)
+	rawConn, err := dialer.Dial("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
@@ -305,7 +335,8 @@ func DialObsidian(cfg ClientTransportConfig) (net.Conn, error) {
 	}
 
 	addr := net.JoinHostPort(cfg.ServerHost, cfg.ServerPort)
-	rawConn, err := net.Dial("tcp", addr)
+	dialer := createClientDialer(cfg, 5*time.Second)
+	rawConn, err := dialer.Dial("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
@@ -535,17 +566,10 @@ func DialTCP(host, port string) (net.Conn, error) {
 	return DialTCPTimeout(host, port, 0)
 }
 
-func DialTCPTimeout(host, port string, timeout time.Duration) (net.Conn, error) {
-	addr := net.JoinHostPort(host, port)
-	var (
-		conn net.Conn
-		err  error
-	)
-	if timeout > 0 {
-		conn, err = net.DialTimeout("tcp", addr, timeout)
-	} else {
-		conn, err = net.Dial("tcp", addr)
-	}
+func DialTCPTimeoutWithConfig(cfg ClientTransportConfig, timeout time.Duration) (net.Conn, error) {
+	addr := net.JoinHostPort(cfg.ServerHost, cfg.ServerPort)
+	dialer := createClientDialer(cfg, timeout)
+	conn, err := dialer.Dial("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
@@ -558,4 +582,8 @@ func DialTCPTimeout(host, port string, timeout time.Duration) (net.Conn, error) 
 		return nil, err
 	}
 	return conn, nil
+}
+
+func DialTCPTimeout(host, port string, timeout time.Duration) (net.Conn, error) {
+	return DialTCPTimeoutWithConfig(ClientTransportConfig{ServerHost: host, ServerPort: port}, timeout)
 }

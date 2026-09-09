@@ -11,6 +11,7 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"syscall"
 
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/hkdf"
@@ -1004,4 +1005,41 @@ func (s *UDPSession) Close() {
 			close(s.done)
 		}
 	})
+}
+
+// DialProtectedUDP creates a connected *net.UDPConn to the specified address.
+// If protector is non-nil, it is called on the underlying socket descriptor
+// before connection is finalized (essential for mobile/Android VpnService.protect).
+func DialProtectedUDP(network, remoteAddr string, protector SocketProtector) (*net.UDPConn, error) {
+	if protector == nil {
+		rAddr, err := net.ResolveUDPAddr(network, remoteAddr)
+		if err != nil {
+			return nil, err
+		}
+		return net.DialUDP(network, nil, rAddr)
+	}
+
+	dialer := &net.Dialer{
+		Control: func(network, address string, c syscall.RawConn) error {
+			var protectErr error
+			err := c.Control(func(fd uintptr) {
+				protectErr = protector(int(fd))
+			})
+			if err != nil {
+				return err
+			}
+			return protectErr
+		},
+	}
+
+	conn, err := dialer.Dial(network, remoteAddr)
+	if err != nil {
+		return nil, err
+	}
+	udpConn, ok := conn.(*net.UDPConn)
+	if !ok {
+		conn.Close()
+		return nil, errors.New("expected *net.UDPConn from dial")
+	}
+	return udpConn, nil
 }
