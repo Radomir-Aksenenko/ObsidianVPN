@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#090a09" />
+    <title>Obsidian — iPhone preview</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="device" aria-label="Интерактивный прототип Obsidian для iPhone">
+      <div class="app-shell">
+        <header class="topbar">
+          <div class="brand"><span class="brand-mark"></span><span>OBSIDIAN</span><em>CONTROL</em></div>
+          <button class="icon-button profile-button" id="quickAdd" aria-label="Добавить профиль">RA</button>
+        </header>
+
+        <section class="screen active" data-screen="home" aria-labelledby="homeTitle">
+          <div class="home-content dashboard-home">
+            <div class="dashboard-heading">
+              <div><span class="eyebrow">Туннель / личное устройство</span><h1 id="homeTitle">Не подключено</h1><p id="connectionSubtitle">Трафик идёт напрямую</p></div>
+              <span class="state-led" aria-hidden="true"></span>
+            </div>
+
+            <article class="tunnel-console">
+              <button class="server-inline" id="selectedServer" aria-label="Выбрать сервер">
+                <span class="country-badge" id="selectedCode">FI</span>
+                <span class="server-copy"><strong id="selectedCity">Хельсинки</strong><small><span id="selectedEndpoint">fi.obsidian.test:443</span><i></i><span id="selectedLatency">42 мс</span></small></span>
+                <span class="chevron">›</span>
+              </button>
+              <div class="tunnel-rule"></div>
+              <div class="tunnel-action-row">
+                <div class="protocol-copy"><span>ПРОТОКОЛ</span><strong>REALITY · UDP</strong><small>IPv4 · SNI microsoft.com</small></div>
+                <button class="connection-orb" id="connectButton" aria-label="Подключить VPN"><span class="orb-ring"></span><span class="power-glyph" aria-hidden="true"></span><strong id="connectLabel">Пуск</strong></button>
+              </div>
+            </article>
+
+            <div class="metrics" aria-label="Показатели подключения">
+              <div><span class="metric-label">RX</span><strong id="speedMetric">—</strong></div>
+              <div><span class="metric-label">СЕССИЯ</span><strong id="sessionMetric">—</strong></div>
+              <div><span class="metric-label">МАРШРУТ</span><strong id="routeMetric">DIRECT</strong></div>
+            </div>
+
+            <div class="section-kicker"><span>Быстрые действия</span><i></i></div>
+            <div class="command-grid">
+              <button data-jump="access"><span class="command-symbol">⌘</span><strong>Выдать доступ</strong><small>3 активных ключа</small></button>
+              <button data-jump="admin"><span class="command-symbol">↯</span><strong>Управлять VPS</strong><small>1 сервер онлайн</small></button>
+            </div>
+
+            <div class="activity-line"><span class="activity-dot"></span><p><strong>Stockholm-01</strong> отвечает · 51 мс</p><time>сейчас</time></div>
+          </div>
+        </section>
+
+        <section class="screen" data-screen="servers" aria-labelledby="serversTitle">
+          <div class="section-heading">
+            <div><p>Инфраструктура</p><h1 id="serversTitle">Серверы</h1></div>
+            <div class="heading-actions"><button class="text-action" id="deployServer">Развернуть VPS</button><button class="round-action" id="addServer" aria-label="Добавить сервер">+</button></div>
+          </div>
+          <div class="server-list" id="serverList"></div>
+          <p class="list-note">Импортированные профили и собственные VPS</p>
+        </section>
+
+        <section class="screen" data-screen="access" aria-labelledby="accessTitle">
+          <div class="section-heading"><div><p>Администрирование</p><h1 id="accessTitle">Доступы</h1></div><button class="round-action" id="issueAccess" aria-label="Выпустить ключ">+</button></div>
+          <div class="access-summary"><div><strong id="accessCount">3</strong><span>активных</span></div><i></i><div><strong>5</strong><span>устройств</span></div><i></i><div><strong>0</strong><span>просрочено</span></div></div>
+          <div class="section-kicker padded"><span>Выданные ключи</span><i></i></div>
+          <div class="access-list" id="accessList"></div>
+        </section>
+
+        <section class="screen" data-screen="admin" aria-labelledby="adminTitle">
+          <div class="section-heading"><div><p>Control plane</p><h1 id="adminTitle">Управление</h1></div><button class="round-action deploy-round" id="deployServerAdmin" aria-label="Развернуть VPS">↗</button></div>
+          <article class="fleet-card">
+            <div class="fleet-top"><span class="vps-monogram">VPS</span><div><strong>Stockholm-01</strong><small>root@91.204.12.44:22</small></div><span class="online-label">ONLINE</span></div>
+            <div class="fleet-metrics"><div><span>Версия</span><strong>v0.1.0</strong></div><div><span>Задержка</span><strong>51 ms</strong></div><div><span>Ключи</span><strong id="fleetKeys">3</strong></div></div>
+            <button class="manage-primary" id="manageVps">Открыть управление VPS <span>›</span></button>
+          </article>
+          <div class="admin-action-list">
+            <button id="quickSni"><span class="admin-symbol">SNI</span><span><strong>Маскировка</strong><small>microsoft.com · REALITY :443</small></span><em>›</em></button>
+            <button id="quickUpdate"><span class="admin-symbol">FW</span><span><strong>Ядро сервера</strong><small>Актуальная версия v0.1.0</small></span><b>OK</b></button>
+            <button id="quickNetwork"><span class="admin-symbol">IP</span><span><strong>Сетевой стек</strong><small>Чистый IPv4 · 370+ Мбит/с</small></span><em>›</em></button>
+          </div>
+          <div class="settings-group compact-settings">
+            <label class="setting-row single"><span><strong>Автоподключение клиента</strong></span><input type="checkbox" id="autoConnect" /><i class="switch"></i></label>
+            <label class="setting-row single"><span><strong>Не обходить VPN-туннель</strong></span><input type="checkbox" id="killSwitch" checked /><i class="switch"></i></label>
+            <label class="setting-row single"><span><strong>Тактильные отклики</strong></span><input type="checkbox" id="haptics" checked /><i class="switch"></i></label>
+          </div>
+        </section>
+
+        <nav class="tabbar" aria-label="Основная навигация">
+          <button class="tab active" data-target="home"><span class="tab-icon home-icon"></span><small>Туннель</small></button>
+          <button class="tab" data-target="servers"><span class="tab-icon nodes-icon"></span><small>Серверы</small></button>
+          <button class="tab" data-target="access"><span class="tab-icon key-icon"></span><small>Доступы</small></button>
+          <button class="tab" data-target="admin"><span class="tab-icon sliders-icon"></span><small>Control</small></button>
+        </nav>
+      </div>
+
+      <dialog id="profileDialog">
+        <form method="dialog" id="profileForm">
+          <div class="sheet-handle" aria-hidden="true"></div>
+          <div class="sheet-header">
+            <div><span>Новый профиль</span><h2>Добавить сервер</h2></div>
+            <button value="cancel" class="close-button" aria-label="Закрыть">×</button>
+          </div>
+          <label class="field-label" for="profileKey">Ключ доступа</label>
+          <textarea id="profileKey" placeholder="obsidian://…" spellcheck="false"></textarea>
+          <p class="field-help">Поддерживаются obsidian://, vpn:// и OBSDN-</p>
+          <button type="button" class="demo-key" id="fillDemo">Подставить тестовый ключ</button>
+          <button type="submit" class="primary-button" value="default">Сохранить сервер</button>
+        </form>
+      </dialog>
+
+      <dialog id="issueDialog" class="admin-sheet">
+        <form method="dialog" id="issueForm">
+          <div class="sheet-handle"></div><div class="sheet-header"><div><span>Доступ</span><h2>Новый ключ</h2></div><button value="cancel" class="close-button" aria-label="Закрыть">×</button></div>
+          <label class="field-label" for="accessName">Имя или назначение</label><input class="sheet-input" id="accessName" value="Семья" />
+          <span class="field-label">Срок действия</span><div class="choice-row" id="daysChoice"><button type="button" data-days="7">7 дней</button><button type="button" data-days="30" class="active">30 дней</button><button type="button" data-days="90">90 дней</button><button type="button" data-days="0">∞</button></div>
+          <span class="field-label">Одновременных устройств</span><div class="stepper"><button type="button" id="devicesMinus">−</button><strong id="devicesCount">3</strong><button type="button" id="devicesPlus">+</button></div>
+          <button type="submit" class="primary-button">Выпустить ключ</button>
+        </form>
+      </dialog>
+
+      <dialog id="keyDialog" class="admin-sheet">
+        <form method="dialog" id="keyForm">
+          <div class="sheet-handle"></div><div class="sheet-header"><div><span>Клиентский доступ</span><h2 id="keyDetailName">Семья</h2></div><button value="cancel" class="close-button" aria-label="Закрыть">×</button></div>
+          <div class="key-status-card"><span class="access-avatar" id="keyDetailAvatar">СЕ</span><div><strong id="keyDetailStatus">Активен</strong><small id="keyDetailMeta">3 устройства · до 19 окт</small></div><i></i></div>
+          <label class="field-label" for="keyDetailValue">Ключ подключения</label>
+          <textarea id="keyDetailValue" class="key-value" readonly>obsidian://SE-DEMO-9K2M-7F4A-2026</textarea>
+          <div class="key-actions"><button type="button" class="secondary-button" id="copyAccessKey">Скопировать ключ</button><button type="button" class="secondary-button" id="showAccessQr">Показать QR</button></div>
+          <div class="qr-panel" id="qrPanel" hidden><div class="qr-demo" aria-label="Демонстрационный QR-код"></div><small>Отсканируйте камерой в приложении Obsidian</small></div>
+          <button type="button" class="danger-button" id="revokeAccess">Отозвать доступ</button>
+        </form>
+      </dialog>
+
+      <dialog id="deployDialog" class="admin-sheet">
+        <form method="dialog" id="deployForm">
+          <div class="sheet-handle"></div><div class="sheet-header"><div><span>Новый узел</span><h2>Развернуть VPS</h2></div><button value="cancel" class="close-button" aria-label="Закрыть">×</button></div>
+          <div class="deploy-progress"><i></i><i></i><i></i></div>
+          <div id="deployFields"><label class="field-label">IP-адрес сервера</label><input class="sheet-input" id="deployHost" value="203.0.113.42" /><div class="field-grid"><div><label class="field-label">Пользователь</label><input class="sheet-input" value="root" /></div><div><label class="field-label">SSH порт</label><input class="sheet-input" value="22" /></div></div><label class="field-label">Маскировка SNI</label><input class="sheet-input" value="www.microsoft.com" /><label class="field-label">Пароль root</label><input class="sheet-input" type="password" value="demo-password" /><button type="submit" class="primary-button">Начать установку</button></div>
+          <div id="deployRunning" hidden><div class="install-status"><span id="deployStage">Подключение по SSH…</span><strong id="deployPercent">8%</strong></div><div class="progress-track"><i id="deployBar"></i></div><pre id="deployLog">$ ssh root@203.0.113.42\nПроверка системы…</pre></div>
+        </form>
+      </dialog>
+
+      <dialog id="adminDialog" class="admin-sheet tall-sheet">
+        <form method="dialog" id="adminForm">
+          <div class="sheet-handle"></div><div class="sheet-header"><div><span>Stockholm-01 · ONLINE</span><h2>Управление VPS</h2></div><button value="cancel" class="close-button" aria-label="Закрыть">×</button></div>
+          <div class="admin-section"><div class="admin-section-head"><strong>Маскировка SNI</strong><span>REALITY :443</span></div><input class="sheet-input mono" id="sniInput" value="www.microsoft.com" /><div class="sni-presets"><button type="button">apple.com</button><button type="button">microsoft.com</button><button type="button">google.com</button></div><button type="button" class="secondary-button" id="applySni">Применить SNI</button></div>
+          <div class="admin-section"><div class="admin-section-head"><strong>Сетевой стек</strong><span id="networkMode">IPv4</span></div><label class="setting-row single"><span><strong>IPv6 Dual-Stack</strong><small>Включить маршрутизацию IPv6</small></span><input type="checkbox" id="ipv6Toggle" /><i class="switch"></i></label></div>
+          <div class="admin-section"><div class="admin-section-head"><strong>Ядро сервера</strong><span class="ok-state">v0.1.0 · актуально</span></div><button type="button" class="secondary-button" id="checkUpdate">Проверить обновления</button></div>
+          <div class="admin-section danger-zone"><div class="admin-section-head"><strong>Обнуление сервера</strong><span>опасная зона</span></div><p>Отзовёт клиентские ключи и создаст новый ключ владельца.</p><button type="button" class="danger-button" id="resetServer">Обнулить сервер</button></div>
+        </form>
+      </dialog>
+
+      <div class="toast" id="toast" role="status" aria-live="polite"></div>
+      <div class="home-indicator" aria-hidden="true"></div>
+    </main>
+    <script src="app.js"></script>
+    <script src="admin.js"></script>
+  </body>
+</html>

@@ -1,0 +1,112 @@
+name: iOS Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - "codex/**"
+    paths:
+      - "ios/**"
+      - "pkg/mobile/**"
+      - "obsidian/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/ios-build.yml"
+  pull_request:
+    paths:
+      - "ios/**"
+      - "pkg/mobile/**"
+      - "obsidian/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/ios-build.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  simulator:
+    name: Build iOS Simulator app
+    runs-on: macos-15
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Show toolchain versions
+        run: |
+          go version
+          xcodebuild -version
+          swift --version
+
+      - name: Test mobile package
+        run: go test ./pkg/mobile
+
+      - name: Install Go Mobile and XcodeGen
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          gomobile init
+          brew install xcodegen
+
+      - name: Build Go Mobile XCFramework
+        run: |
+          mkdir -p ios/Frameworks
+          gomobile bind \
+            -target=ios,iossimulator \
+            -o ios/Frameworks/Obsidian.xcframework \
+            ./pkg/mobile
+
+      - name: Generate Xcode project
+        working-directory: ios
+        run: xcodegen generate
+
+      - name: Build unsigned simulator app
+        working-directory: ios
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project ObsidianVPN.xcodeproj \
+            -scheme ObsidianVPN \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination "generic/platform=iOS Simulator" \
+            -derivedDataPath "$RUNNER_TEMP/ObsidianDerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build | tee "$RUNNER_TEMP/ios-build.log"
+
+      - name: Package simulator app
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent \
+            "$RUNNER_TEMP/ObsidianDerivedData/Build/Products/Debug-iphonesimulator/ObsidianVPN.app" \
+            "$RUNNER_TEMP/ObsidianVPN-simulator.zip"
+
+      - name: Upload simulator app
+        uses: actions/upload-artifact@v4
+        with:
+          name: ObsidianVPN-iOS-Simulator
+          path: |
+            ${{ runner.temp }}/ObsidianVPN-simulator.zip
+            ${{ runner.temp }}/ios-build.log
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload XCFramework
+        uses: actions/upload-artifact@v4
+        with:
+          name: ObsidianVPN-XCFramework
+          path: ios/Frameworks/Obsidian.xcframework
+          if-no-files-found: error
+          retention-days: 14
