@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"fmt"
 	"io"
 	"log"
@@ -34,6 +35,8 @@ type wintunAdapter struct {
 	routes       map[string]routeSpec
 	stopApps     chan struct{}
 	stopOnce     sync.Once
+	splitMatcher *SplitMatcher
+	splitMode    string
 }
 
 type routeSpec struct {
@@ -56,6 +59,9 @@ func (w *wintunAdapter) Read(buf []byte) (int, error) {
 		if err == nil {
 			n := copy(buf, pkt)
 			w.session.ReleaseReceivePacket(pkt)
+			if w.splitMatcher != nil && n > 0 {
+				w.handleDNSQuery(buf[:n])
+			}
 			return n, nil
 		}
 		errNo, ok := err.(syscall.Errno)
@@ -68,6 +74,9 @@ func (w *wintunAdapter) Read(buf []byte) (int, error) {
 }
 
 func (w *wintunAdapter) Write(buf []byte) (int, error) {
+	if w.splitMatcher != nil && len(buf) > 0 {
+		w.handleDNSResponse(buf)
+	}
 	w.writeMu.Lock()
 	defer w.writeMu.Unlock()
 	runtime.KeepAlive(w.adapter)
@@ -104,13 +113,12 @@ func (w *wintunAdapter) Close() error {
 	return nil
 }
 
-func enableWindowsDNSLeakProtection(origGW, primaryDNS, secondaryDNS string) {
-	// 1. Block outbound DNS (UDP and TCP port 53) on all physical network adapters
-	// so Windows and applications cannot leak queries to ISP DNS (Rostelecom, local router, etc).
-	// Only the ObsidianVPN virtual adapter is exempted from this block.
-	// Also block all outbound IPv6 DNS (::/0) since the VPN tunnel currently routes IPv4,
-	// completely eliminating dual-stack ISP IPv6 DNS leaks (Rostelecom 2a01:620:... etc).
-	// 2. Add NRPT rule to bind all FQDN resolution (".") strictly to VPN tunnel DNS.
+func enableWindowsDNSLeakProtection(origGW, primaryDNS, secondaryDNS string, splitActive bool) {
+	// 1. In full-tunnel mode, block outbound DNS (UDP and TCP port 53) on physical network adapters
+	// so Windows and applications cannot leak queries to ISP DNS.
+	// In split-tunnel mode, do NOT block physical adapter DNS so that bypassed domains/apps
+	// can resolve properly through local/ISP DNS without interference.
+	// 2. Add NRPT rule to bind default FQDN resolution (".") to VPN tunnel DNS.
 	// 3. Disable Smart Multi-Homed Name Resolution (SMHNR) and LLMNR during active session.
 	// 4. Flush DNS cache.
 	nsList := fmt.Sprintf("@('%s','2606:4700:4700::1111','2001:4860:4860::8888')", primaryDNS)
@@ -118,7 +126,9 @@ func enableWindowsDNSLeakProtection(origGW, primaryDNS, secondaryDNS string) {
 		nsList = fmt.Sprintf("@('%s','%s','2606:4700:4700::1111','2001:4860:4860::8888')", primaryDNS, secondaryDNS)
 	}
 
-	psScript := fmt.Sprintf(`
+	var psScript string
+	if !splitActive {
+		psScript = fmt.Sprintf(`
 $adapters = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object Name -ne 'ObsidianVPN' | Where-Object Status -eq 'Up' | Select-Object -ExpandProperty Name
 if ($adapters) {
     New-NetFirewallRule -DisplayName 'ObsidianVPN-Block-Physical-DNS-UDP' -Name 'ObsidianVPN-Block-Physical-DNS-UDP' -Direction Outbound -Action Block -Protocol UDP -RemotePort 53 -InterfaceAlias $adapters -ErrorAction SilentlyContinue | Out-Null
@@ -127,11 +137,17 @@ if ($adapters) {
 Add-DnsClientNrptRule -Namespace '.' -NameServers %s -DisplayName 'ObsidianVPN-NRPT' -ErrorAction SilentlyContinue | Out-Null
 Clear-DnsClientCache -ErrorAction SilentlyContinue | Out-Null
 `, nsList)
+	} else {
+		psScript = fmt.Sprintf(`
+Add-DnsClientNrptRule -Namespace '.' -NameServers %s -DisplayName 'ObsidianVPN-NRPT' -ErrorAction SilentlyContinue | Out-Null
+Clear-DnsClientCache -ErrorAction SilentlyContinue | Out-Null
+`, nsList)
+	}
 
 	startCommand("enable DNS leak protection", "powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", psScript)
 
-	// Block router IP directly as extra safeguard
-	if origGW != "" {
+	// Block router IP directly as extra safeguard only in full tunnel mode
+	if !splitActive && origGW != "" {
 		startCommand("block router DNS UDP", "netsh", "advfirewall", "firewall", "add", "rule",
 			"name=ObsidianVPN-Block-Router-DNS", "dir=out", "action=block", "protocol=UDP", "remoteport=53", "remoteip="+origGW)
 		startCommand("block router DNS TCP", "netsh", "advfirewall", "firewall", "add", "rule",
@@ -307,7 +323,8 @@ func openTUN(cfg Config) io.ReadWriteCloser {
 	w.origGW = origGW
 	log.Printf("original gateway: %s", origGW)
 
-	enableWindowsDNSLeakProtection(origGW, primaryDNS, secondaryDNS)
+	splitActive := splitTunnelEnabled(cfg)
+	enableWindowsDNSLeakProtection(origGW, primaryDNS, secondaryDNS, splitActive)
 	startCommand("flush DNS cache", "ipconfig", "/flushdns")
 
 	// Bypass route for VPN server
@@ -319,25 +336,44 @@ func openTUN(cfg Config) io.ReadWriteCloser {
 	// Clean ALL stale 0/1 and 128/1 routes from previous runs (any interface)
 	psCleanRoutes(ifIndex, primaryDNS, secondaryDNS)
 
+	// Always bypass private LAN subnets to preserve local network access (printers, router admin, local NAS)
+	if origGW != "" {
+		privateLANs := []routeSpec{
+			{dest: "10.0.0.0", mask: "255.0.0.0"},
+			{dest: "172.16.0.0", mask: "255.240.0.0"},
+			{dest: "192.168.0.0", mask: "255.255.0.0"},
+		}
+		for _, lan := range privateLANs {
+			w.addBypassRoute(lan, origGW)
+		}
+	}
+
 	// Add routes
 	mode := splitTunnelMode(cfg)
-	siteRoutes := resolveSplitRouteSpecs(cfg.RouteIPs, cfg.SplitSites)
-	if !splitTunnelEnabled(cfg) {
+	w.splitMode = mode
+
+	if !splitActive {
 		addInterfaceRoute("0.0.0.0", "128.0.0.0", ifIndex)
 		addInterfaceRoute("128.0.0.0", "128.0.0.0", ifIndex)
 		log.Printf("full tunnel mode via TUN IF %s", ifIndex)
-	} else if mode == splitModeInclude {
-		for _, route := range siteRoutes {
-			w.addVPNRoute(route, ifIndex)
-		}
-		log.Printf("split-tunnel include mode: %d site/ip routes", len(siteRoutes))
 	} else {
-		addInterfaceRoute("0.0.0.0", "128.0.0.0", ifIndex)
-		addInterfaceRoute("128.0.0.0", "128.0.0.0", ifIndex)
-		for _, route := range siteRoutes {
-			w.addBypassRoute(route, origGW)
+		matcher := NewSplitMatcher(splitTunnelEntries(cfg.RouteIPs, cfg.SplitSites, nil, nil))
+		w.splitMatcher = matcher
+		siteRoutes := resolveSplitRouteSpecs(matcher)
+
+		if mode == splitModeInclude {
+			for _, route := range siteRoutes {
+				w.addVPNRoute(route, ifIndex)
+			}
+			log.Printf("split-tunnel include mode active: %d initial routes, dynamic DNS routing active for %d rules", len(siteRoutes), len(matcher.Domains()))
+		} else {
+			addInterfaceRoute("0.0.0.0", "128.0.0.0", ifIndex)
+			addInterfaceRoute("128.0.0.0", "128.0.0.0", ifIndex)
+			for _, route := range siteRoutes {
+				w.addBypassRoute(route, origGW)
+			}
+			log.Printf("split-tunnel exclude mode active: %d initial bypass routes, dynamic DNS routing active for %d rules", len(siteRoutes), len(matcher.Domains()))
 		}
-		log.Printf("split-tunnel exclude mode: %d site/ip bypass routes", len(siteRoutes))
 	}
 	addInterfaceRoute(primaryDNS, "255.255.255.255", ifIndex)
 	log.Printf("dns route: %s -> TUN", primaryDNS)
@@ -632,21 +668,100 @@ func (w *wintunAdapter) rememberRoute(route routeSpec) bool {
 	return true
 }
 
-func resolveSplitRouteSpecs(routeIPs, sites []string) []routeSpec {
-	var out []routeSpec
-	for _, item := range splitTunnelEntries(routeIPs, sites, nil, nil) {
-		if route, ok := parseRouteSpec(item); ok {
-			out = append(out, route)
-			continue
-		}
-		ips, err := net.LookupIP(item)
-		if err != nil {
-			log.Printf("split site resolve failed %q: %v", item, err)
-			continue
-		}
+func (w *wintunAdapter) handleDNSQuery(buf []byte) {
+	if w.splitMatcher == nil || len(buf) < 28 {
+		return
+	}
+	if buf[0]>>4 != 4 {
+		return
+	}
+	ihl := int(buf[0]&0x0F) * 4
+	if len(buf) < ihl+8 || buf[9] != 17 {
+		return
+	}
+	destPort := binary.BigEndian.Uint16(buf[ihl+2 : ihl+4])
+	if destPort != 53 {
+		return
+	}
+	payload := buf[ihl+8:]
+	qname, isResp, _ := ParseDNSMessage(payload)
+	if isResp || qname == "" {
+		return
+	}
+
+	if w.splitMatcher.MatchesDomain(qname) {
+		go func(domain string) {
+			ips, err := net.LookupIP(domain)
+			if err != nil {
+				return
+			}
+			for _, ip := range ips {
+				if ip4 := ip.To4(); ip4 != nil {
+					route := routeSpec{dest: ip4.String(), mask: "255.255.255.255"}
+					if w.splitMode == splitModeExclude {
+						w.addBypassRoute(route, w.origGW)
+					} else if w.splitMode == splitModeInclude {
+						w.addVPNRoute(route, w.ifIndex)
+					}
+				}
+			}
+		}(qname)
+	}
+}
+
+func (w *wintunAdapter) handleDNSResponse(buf []byte) {
+	if w.splitMatcher == nil || len(buf) < 28 {
+		return
+	}
+	if buf[0]>>4 != 4 {
+		return
+	}
+	ihl := int(buf[0]&0x0F) * 4
+	if len(buf) < ihl+8 || buf[9] != 17 {
+		return
+	}
+	srcPort := binary.BigEndian.Uint16(buf[ihl : ihl+2])
+	if srcPort != 53 {
+		return
+	}
+	payload := buf[ihl+8:]
+	qname, isResp, ips := ParseDNSMessage(payload)
+	if !isResp || len(ips) == 0 || qname == "" {
+		return
+	}
+
+	if w.splitMatcher.MatchesDomain(qname) {
 		for _, ip := range ips {
-			if ip4 := ip.To4(); ip4 != nil {
-				out = append(out, routeSpec{dest: ip4.String(), mask: "255.255.255.255"})
+			route := routeSpec{dest: ip.String(), mask: "255.255.255.255"}
+			if w.splitMode == splitModeExclude {
+				w.addBypassRoute(route, w.origGW)
+			} else if w.splitMode == splitModeInclude {
+				w.addVPNRoute(route, w.ifIndex)
+			}
+		}
+	}
+}
+
+func resolveSplitRouteSpecs(matcher *SplitMatcher) []routeSpec {
+	if matcher == nil {
+		return nil
+	}
+	var out []routeSpec
+	out = append(out, matcher.StaticRoutes()...)
+
+	for _, domain := range matcher.Domains() {
+		if strings.HasPrefix(domain, "*") {
+			continue
+		}
+		for _, target := range []string{domain, "www." + domain} {
+			ips, err := net.LookupIP(target)
+			if err != nil {
+				continue
+			}
+			for _, ip := range ips {
+				if ip4 := ip.To4(); ip4 != nil {
+					out = append(out, routeSpec{dest: ip4.String(), mask: "255.255.255.255"})
+				}
 			}
 		}
 	}
