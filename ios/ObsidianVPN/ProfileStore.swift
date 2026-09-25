@@ -95,9 +95,13 @@ final class ProfileStore: ObservableObject {
         sharedDefaults.set(data, forKey: profilesKey)
         standardDefaults.set(data, forKey: profilesKey)
 
-        if let active = selectedProfile, let activeData = try? JSONEncoder().encode(active) {
-            sharedDefaults.set(activeData, forKey: activeProfileKey)
-            standardDefaults.set(activeData, forKey: activeProfileKey)
+        if let active = selectedProfile {
+            if let activeData = try? JSONEncoder().encode(active) {
+                sharedDefaults.set(activeData, forKey: activeProfileKey)
+                standardDefaults.set(activeData, forKey: activeProfileKey)
+            }
+            sharedDefaults.set(active.configURI, forKey: "vpn.active-config-uri.v1")
+            standardDefaults.set(active.configURI, forKey: "vpn.active-config-uri.v1")
         }
 
         sharedDefaults.set(selectedID?.uuidString, forKey: selectedKey)

@@ -25,12 +25,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             configURI = options?["configURI"] as? String
         }
 
-        // Fallback to active profile saved in shared defaults
+        // Fallback to active config URI saved in shared defaults
         if configURI == nil || configURI?.isEmpty == true {
-            if let activeData = sharedDefaults.data(forKey: "vpn.active-profile.v1"),
-               let profile = try? JSONDecoder().decode(VPNProfile.self, from: activeData) {
-                configURI = profile.configURI
-                tunnelLog("Конфигурация получена из активного профиля: \(profile.name)")
+            if let activeURI = sharedDefaults.string(forKey: "vpn.active-config-uri.v1"), !activeURI.isEmpty {
+                configURI = activeURI
+                tunnelLog("Конфигурация получена из активного профиля")
             }
         }
 
