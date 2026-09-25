@@ -36,10 +36,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             }
 
             do {
-                try engine.start(configURI: configURI, mtu: 1420)
-                isRunning = true
-                readFromSystem()
-                readFromEngine()
+                try self.engine.start(configURI: configURI, mtu: 1420)
+                self.isRunning = true
+                self.readFromSystem()
+                self.readFromEngine()
                 completionHandler(nil)
             } catch {
                 completionHandler(error)
@@ -59,20 +59,22 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private func readFromSystem() {
         guard isRunning else { return }
         packetFlow.readPackets { [weak self] packets, _ in
-            guard let self, isRunning else { return }
-            packets.forEach { try? engine.inject($0) }
-            readFromSystem()
+            guard let self, self.isRunning else { return }
+            for packet in packets {
+                try? self.engine.inject(packet)
+            }
+            self.readFromSystem()
         }
     }
 
     private func readFromEngine() {
         receiveQueue.async { [weak self] in
             guard let self else { return }
-            while isRunning {
-                guard let packet = try? engine.receive(timeoutMilliseconds: 500), !packet.isEmpty else { continue }
+            while self.isRunning {
+                guard let packet = try? self.engine.receive(timeoutMilliseconds: 500), !packet.isEmpty else { continue }
                 let version = packet.first.map { $0 >> 4 } ?? 4
                 let family = NSNumber(value: version == 6 ? AF_INET6 : AF_INET)
-                packetFlow.writePackets([packet], withProtocols: [family])
+                self.packetFlow.writePackets([packet], withProtocols: [family])
             }
         }
     }
