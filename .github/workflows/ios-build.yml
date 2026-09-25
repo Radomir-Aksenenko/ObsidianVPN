@@ -56,6 +56,7 @@ jobs:
 
       - name: Install Go Mobile and XcodeGen
         run: |
+          go get -tool golang.org/x/mobile/cmd/gobind
           go install golang.org/x/mobile/cmd/gobind@latest
           go install golang.org/x/mobile/cmd/gomobile@latest
           gomobile init
