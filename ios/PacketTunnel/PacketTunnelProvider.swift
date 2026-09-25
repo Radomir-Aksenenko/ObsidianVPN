@@ -18,20 +18,35 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let sharedDefaults = UserDefaults(suiteName: "group.com.obsidian.vpn") ?? .standard
         sharedDefaults.removeObject(forKey: "lastTunnelError")
 
+        tunnelLog("Запрос на запуск туннеля...")
+
         var configURI = (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration?["configURI"] as? String
         if configURI == nil || configURI?.isEmpty == true {
             configURI = options?["configURI"] as? String
         }
 
+        // Fallback to active profile saved in shared defaults
+        if configURI == nil || configURI?.isEmpty == true {
+            if let activeData = sharedDefaults.data(forKey: "vpn.active-profile.v1"),
+               let profile = try? JSONDecoder().decode(VPNProfile.self, from: activeData) {
+                configURI = profile.configURI
+                tunnelLog("Конфигурация получена из активного профиля: \(profile.name)")
+            }
+        }
+
         guard let uri = configURI, !uri.isEmpty else {
             let err = TunnelProviderError.missingConfiguration
             sharedDefaults.set(err.localizedDescription, forKey: "lastTunnelError")
+            tunnelLog("ОШИБКА: отсутствует конфигурация configURI")
             completionHandler(err)
             return
         }
 
+        tunnelLog("Ключ получен (\(uri.prefix(15))...)")
+
         let rawServer = (protocolConfiguration as? NETunnelProviderProtocol)?.serverAddress ?? ""
         let serverIP = extractServerIP(from: uri, fallback: rawServer)
+        tunnelLog("Адрес шлюза/сервера: \(serverIP ?? "10.8.0.1")")
 
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: serverIP ?? "10.8.0.1")
         let ipv4 = NEIPv4Settings(addresses: ["10.8.0.2"], subnetMasks: ["255.255.255.0"])
@@ -51,19 +66,25 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         setTunnelNetworkSettings(settings) { [weak self] error in
             guard let self else { return }
             if let error {
-                sharedDefaults.set("Ошибка сетевых настроек: \(error.localizedDescription)", forKey: "lastTunnelError")
+                let msg = "Ошибка сетевых настроек: \(error.localizedDescription)"
+                sharedDefaults.set(msg, forKey: "lastTunnelError")
+                tunnelLog("ОШИБКА: \(msg)")
                 completionHandler(error)
                 return
             }
 
+            tunnelLog("Сетевые настройки применены, запуск ядра Obsidian...")
             do {
                 try self.engine.start(configURI: uri, mtu: 1420)
                 self.isRunning = true
                 self.readFromSystem()
                 self.readFromEngine()
+                tunnelLog("Ядро Obsidian успешно запущено, туннель активен")
                 completionHandler(nil)
             } catch {
-                sharedDefaults.set("Ошибка ядра: \(error.localizedDescription)", forKey: "lastTunnelError")
+                let msg = "Ошибка ядра: \(error.localizedDescription)"
+                sharedDefaults.set(msg, forKey: "lastTunnelError")
+                tunnelLog("ОШИБКА: \(msg)")
                 completionHandler(error)
             }
         }
@@ -204,4 +225,20 @@ private final class ObsidianPacketEngine {
         self.sessionID = nil
         #endif
     }
+}
+
+private func tunnelLog(_ message: String) {
+    let formatter = DateFormatter()
+    formatter.dateFormat = "HH:mm:ss"
+    let timestamp = formatter.string(from: Date())
+    let line = "[\(timestamp)] [Tunnel] \(message)"
+
+    let defaults = UserDefaults(suiteName: "group.com.obsidian.vpn") ?? .standard
+    let logsKey = "vpn.runtime.logs.v1"
+    var logs = defaults.stringArray(forKey: logsKey) ?? []
+    logs.append(line)
+    if logs.count > 120 {
+        logs.removeFirst(logs.count - 120)
+    }
+    defaults.set(logs, forKey: logsKey)
 }

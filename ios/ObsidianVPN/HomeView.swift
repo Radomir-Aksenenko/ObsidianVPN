@@ -7,6 +7,7 @@ struct HomeView: View {
     @AppStorage("settings.haptics", store: UserDefaults(suiteName: "group.com.obsidian.vpn")) private var haptics = true
     @State private var showImport = false
     @State private var showScanner = false
+    @StateObject private var logStore = LogStore.shared
 
     let openServers: () -> Void
 
@@ -30,6 +31,8 @@ struct HomeView: View {
                         if case let .failed(message) = tunnel.state {
                             errorBanner(message).padding(.top, 16)
                         }
+
+                        logsConsole.padding(.top, 20)
                     }
                     .padding(.horizontal, 20)
                     .padding(.bottom, 34)
@@ -56,8 +59,12 @@ struct HomeView: View {
             .sheet(isPresented: $showImport) { AddProfileView() }
             .sheet(isPresented: $showScanner) {
                 QRScannerSheet { scannedCode in
-                    if let profile = try? VPNProfile.imported(from: scannedCode) {
+                    do {
+                        let profile = try VPNProfile.imported(from: scannedCode)
                         profiles.add(profile)
+                        logStore.log("QR успешно распознан: \(profile.name)")
+                    } catch {
+                        logStore.log("Ошибка формата QR: \(error.localizedDescription)")
                     }
                 }
             }
@@ -178,5 +185,75 @@ struct HomeView: View {
         }
         .padding(14)
         .background(ObsidianTheme.danger.opacity(0.09), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private var logsConsole: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label("Журнал событий", systemImage: "terminal")
+                    .font(.system(.caption, design: .rounded, weight: .semibold))
+                    .foregroundStyle(ObsidianTheme.secondaryText)
+                Spacer()
+                Button {
+                    UIPasteboard.general.string = logStore.entries.joined(separator: "\n")
+                } label: {
+                    Label("Скопировать", systemImage: "doc.on.doc")
+                        .font(.caption2)
+                }
+                .buttonStyle(.borderless)
+
+                Button {
+                    logStore.clear()
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.caption2)
+                }
+                .buttonStyle(.borderless)
+            }
+
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 4) {
+                        if logStore.entries.isEmpty {
+                            Text("Журнал пуст. Нажмите на сферу, чтобы начать подключение.")
+                                .font(.system(.caption2, design: .monospaced))
+                                .foregroundStyle(ObsidianTheme.secondaryText.opacity(0.6))
+                        } else {
+                            ForEach(Array(logStore.entries.enumerated()), id: \.offset) { index, entry in
+                                Text(entry)
+                                    .font(.system(.caption2, design: .monospaced))
+                                    .foregroundStyle(logColor(for: entry))
+                                    .id(index)
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(10)
+                }
+                .frame(height: 140)
+                .background(Color.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 12))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(ObsidianTheme.hairline, lineWidth: 1)
+                )
+                .onChange(of: logStore.entries.count) { _ in
+                    if let lastIndex = logStore.entries.indices.last {
+                        withAnimation { proxy.scrollTo(lastIndex, anchor: .bottom) }
+                    }
+                }
+            }
+        }
+    }
+
+    private func logColor(for entry: String) -> Color {
+        if entry.contains("ОШИБКА") || entry.contains("Сбой") || entry.contains("failed") {
+            return ObsidianTheme.danger
+        } else if entry.contains("успешно") || entry.contains("Подключено") || entry.contains("connected") {
+            return ObsidianTheme.accent
+        } else if entry.contains("Добавлен") || entry.contains("Выбран") {
+            return .cyan
+        } else {
+            return ObsidianTheme.primaryText.opacity(0.85)
+        }
     }
 }

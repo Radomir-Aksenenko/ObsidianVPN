@@ -58,6 +58,7 @@ final class TunnelController: ObservableObject {
     private func connect(_ profile: VPNProfile) async {
         state = .preparing
         sharedDefaults.removeObject(forKey: "lastTunnelError")
+        LogStore.shared.log("Инициализация подключения к \(profile.name)...")
         do {
             let manager = try await configuredManager(for: profile)
             self.manager = manager
@@ -66,14 +67,18 @@ final class TunnelController: ObservableObject {
                 "configURI": profile.configURI as NSString,
                 "profileName": profile.name as NSString
             ]
+            LogStore.shared.log("Запрос startVPNTunnel к системному расширению...")
             try manager.connection.startVPNTunnel(options: options)
+            LogStore.shared.log("Команда запуска передана в iOS")
         } catch {
+            LogStore.shared.log("Ошибка запуска: \(error.localizedDescription)")
             state = .failed(error.localizedDescription)
         }
     }
 
     private func disconnect() {
         state = .disconnecting
+        LogStore.shared.log("Остановка туннеля...")
         manager?.connection.stopVPNTunnel()
     }
 
@@ -148,10 +153,16 @@ final class TunnelController: ObservableObject {
         case .connected:
             if connectedAt == nil { connectedAt = Date() }
             state = .connected
-        case .connecting, .reasserting:
+            LogStore.shared.log("Статус: Подключено (VPN активен)")
+        case .connecting:
             state = .preparing
+            LogStore.shared.log("Статус: Соединение с сервером...")
+        case .reasserting:
+            state = .preparing
+            LogStore.shared.log("Статус: Переподключение...")
         case .disconnecting:
             state = .disconnecting
+            LogStore.shared.log("Статус: Отключение...")
         case .disconnected:
             connectedAt = nil
             downloadBytesPerSecond = 0
@@ -160,18 +171,23 @@ final class TunnelController: ObservableObject {
                 let err = sharedDefaults.string(forKey: "lastTunnelError")
                 if let err, !err.isEmpty {
                     sharedDefaults.removeObject(forKey: "lastTunnelError")
+                    LogStore.shared.log("Сбой: \(err)")
                     state = .failed(err)
                 } else {
-                    state = .failed("Не удалось установить туннель к серверу. Проверьте ключ и доступность хоста.")
+                    let defaultErr = "Не удалось установить туннель к серверу. Проверьте ключ и доступность хоста."
+                    LogStore.shared.log("Сбой: \(defaultErr)")
+                    state = .failed(defaultErr)
                 }
             } else {
                 state = .disconnected
+                LogStore.shared.log("Статус: Отключено")
             }
         case .invalid:
             connectedAt = nil
             downloadBytesPerSecond = 0
             uploadBytesPerSecond = 0
             state = .disconnected
+            LogStore.shared.log("Статус: Профиль недействителен (invalid)")
         @unknown default:
             state = .disconnected
         }
