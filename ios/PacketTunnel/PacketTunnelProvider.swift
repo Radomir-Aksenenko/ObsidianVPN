@@ -15,36 +15,103 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         options: [String: NSObject]?,
         completionHandler: @escaping (Error?) -> Void
     ) {
-        guard let tunnelProtocol = protocolConfiguration as? NETunnelProviderProtocol,
-              let configURI = tunnelProtocol.providerConfiguration?["configURI"] as? String else {
-            completionHandler(TunnelProviderError.missingConfiguration)
+        let sharedDefaults = UserDefaults(suiteName: "group.com.obsidian.vpn") ?? .standard
+        sharedDefaults.removeObject(forKey: "lastTunnelError")
+
+        var configURI = (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration?["configURI"] as? String
+        if configURI == nil || configURI?.isEmpty == true {
+            configURI = options?["configURI"] as? String
+        }
+
+        guard let uri = configURI, !uri.isEmpty else {
+            let err = TunnelProviderError.missingConfiguration
+            sharedDefaults.set(err.localizedDescription, forKey: "lastTunnelError")
+            completionHandler(err)
             return
         }
 
-        let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: tunnelProtocol.serverAddress ?? "127.0.0.1")
+        let rawServer = (protocolConfiguration as? NETunnelProviderProtocol)?.serverAddress ?? ""
+        let serverIP = extractServerIP(from: uri, fallback: rawServer)
+
+        let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: serverIP ?? "10.8.0.1")
         let ipv4 = NEIPv4Settings(addresses: ["10.8.0.2"], subnetMasks: ["255.255.255.0"])
         ipv4.includedRoutes = [.default()]
+
+        if let serverIP {
+            ipv4.excludedRoutes = [NEIPv4Route(destinationAddress: serverIP, subnetMask: "255.255.255.255")]
+        }
+
         settings.ipv4Settings = ipv4
-        settings.dnsSettings = NEDNSSettings(servers: ["1.1.1.1", "8.8.8.8"])
+
+        let dns = NEDNSSettings(servers: ["1.1.1.1", "8.8.8.8"])
+        dns.matchDomains = [""]
+        settings.dnsSettings = dns
         settings.mtu = 1420
 
         setTunnelNetworkSettings(settings) { [weak self] error in
             guard let self else { return }
             if let error {
+                sharedDefaults.set("Ошибка сетевых настроек: \(error.localizedDescription)", forKey: "lastTunnelError")
                 completionHandler(error)
                 return
             }
 
             do {
-                try self.engine.start(configURI: configURI, mtu: 1420)
+                try self.engine.start(configURI: uri, mtu: 1420)
                 self.isRunning = true
                 self.readFromSystem()
                 self.readFromEngine()
                 completionHandler(nil)
             } catch {
+                sharedDefaults.set("Ошибка ядра: \(error.localizedDescription)", forKey: "lastTunnelError")
                 completionHandler(error)
             }
         }
+    }
+
+    private func extractServerIP(from uri: String, fallback: String) -> String? {
+        let host: String
+        if let components = URLComponents(string: uri), let h = components.host, !h.isEmpty {
+            host = h
+        } else if !fallback.isEmpty {
+            host = fallback
+        } else {
+            return nil
+        }
+
+        var cleaned = host
+        if let colonIndex = cleaned.firstIndex(of: ":") {
+            cleaned = String(cleaned[..<colonIndex])
+        }
+        cleaned = cleaned.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+
+        var sin = sockaddr_in()
+        if cleaned.withCString({ inet_pton(AF_INET, $0, &sin.sin_addr) }) == 1 {
+            return cleaned
+        }
+
+        var hints = addrinfo(
+            ai_flags: 0,
+            ai_family: AF_INET,
+            ai_socktype: SOCK_STREAM,
+            ai_protocol: 0,
+            ai_addrlen: 0,
+            ai_canonname: nil,
+            ai_addr: nil,
+            ai_next: nil
+        )
+        var res: UnsafeMutablePointer<addrinfo>?
+        if getaddrinfo(cleaned, nil, &hints, &res) == 0, let first = res {
+            defer { freeaddrinfo(res) }
+            let addr = first.pointee.ai_addr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee }
+            var ipBuf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+            var ipAddr = addr.sin_addr
+            if inet_ntop(AF_INET, &ipAddr, &ipBuf, socklen_t(INET_ADDRSTRLEN)) != nil {
+                return String(cString: ipBuf)
+            }
+        }
+
+        return nil
     }
 
     override func stopTunnel(

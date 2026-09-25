@@ -57,11 +57,16 @@ final class TunnelController: ObservableObject {
 
     private func connect(_ profile: VPNProfile) async {
         state = .preparing
+        sharedDefaults.removeObject(forKey: "lastTunnelError")
         do {
             let manager = try await configuredManager(for: profile)
             self.manager = manager
             observeStatus()
-            try manager.connection.startVPNTunnel()
+            let options: [String: NSObject] = [
+                "configURI": profile.configURI as NSString,
+                "profileName": profile.name as NSString
+            ]
+            try manager.connection.startVPNTunnel(options: options)
         } catch {
             state = .failed(error.localizedDescription)
         }
@@ -84,15 +89,24 @@ final class TunnelController: ObservableObject {
     private func configuredManager(for profile: VPNProfile) async throws -> NETunnelProviderManager {
         let manager = try await loadManager()
         let tunnelProtocol = NETunnelProviderProtocol()
-        tunnelProtocol.providerBundleIdentifier = "com.obsidian.vpn.PacketTunnel"
+
+        let appBundleId = Bundle.main.bundleIdentifier ?? "com.obsidian.vpn"
+        let pluginBundleId: String
+        if let pluginURL = Bundle.main.builtInPlugInsURL?.appendingPathComponent("PacketTunnel.appex"),
+           let pluginBundle = Bundle(url: pluginURL),
+           let id = pluginBundle.bundleIdentifier {
+            pluginBundleId = id
+        } else {
+            pluginBundleId = "\(appBundleId).PacketTunnel"
+        }
+        tunnelProtocol.providerBundleIdentifier = pluginBundleId
         tunnelProtocol.serverAddress = profile.endpoint
         tunnelProtocol.providerConfiguration = [
             "configURI": profile.configURI,
             "profileName": profile.name
         ]
         tunnelProtocol.disconnectOnSleep = false
-        let preventBypass = sharedDefaults.object(forKey: "settings.killSwitch") as? Bool ?? true
-        tunnelProtocol.includeAllNetworks = preventBypass
+        tunnelProtocol.includeAllNetworks = false
         tunnelProtocol.excludeLocalNetworks = false
 
         manager.localizedDescription = "Obsidian — \(profile.name)"
@@ -138,7 +152,22 @@ final class TunnelController: ObservableObject {
             state = .preparing
         case .disconnecting:
             state = .disconnecting
-        case .disconnected, .invalid:
+        case .disconnected:
+            connectedAt = nil
+            downloadBytesPerSecond = 0
+            uploadBytesPerSecond = 0
+            if state == .preparing {
+                let err = sharedDefaults.string(forKey: "lastTunnelError")
+                if let err, !err.isEmpty {
+                    sharedDefaults.removeObject(forKey: "lastTunnelError")
+                    state = .failed(err)
+                } else {
+                    state = .failed("Не удалось установить туннель к серверу. Проверьте ключ и доступность хоста.")
+                }
+            } else {
+                state = .disconnected
+            }
+        case .invalid:
             connectedAt = nil
             downloadBytesPerSecond = 0
             uploadBytesPerSecond = 0

@@ -6,6 +6,7 @@ struct AddProfileView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var key = ""
     @State private var errorMessage: String?
+    @State private var showScanner = false
 
     var body: some View {
         NavigationStack {
@@ -19,6 +20,12 @@ struct AddProfileView: View {
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                             .accessibilityLabel("Ключ доступа")
+
+                        Button {
+                            showScanner = true
+                        } label: {
+                            Label("Сканировать QR-код", systemImage: "qrcode.viewfinder")
+                        }
 
                         Button {
                             if let pasted = UIPasteboard.general.string { key = pasted }
@@ -51,6 +58,12 @@ struct AddProfileView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Отмена") { dismiss() }
+                }
+            }
+            .sheet(isPresented: $showScanner) {
+                QRScannerSheet { scannedCode in
+                    key = scannedCode
+                    save()
                 }
             }
         }

@@ -6,6 +6,7 @@ struct HomeView: View {
     @EnvironmentObject private var tunnel: TunnelController
     @AppStorage("settings.haptics", store: UserDefaults(suiteName: "group.com.obsidian.vpn")) private var haptics = true
     @State private var showImport = false
+    @State private var showScanner = false
 
     let openServers: () -> Void
 
@@ -44,11 +45,22 @@ struct HomeView: View {
                         .accessibilityHidden(true)
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button { showImport = true } label: { Image(systemName: "plus") }
-                        .accessibilityLabel("Добавить сервер")
+                    HStack(spacing: 14) {
+                        Button { showScanner = true } label: { Image(systemName: "qrcode.viewfinder") }
+                            .accessibilityLabel("Сканировать QR-код")
+                        Button { showImport = true } label: { Image(systemName: "plus") }
+                            .accessibilityLabel("Добавить сервер")
+                    }
                 }
             }
             .sheet(isPresented: $showImport) { AddProfileView() }
+            .sheet(isPresented: $showScanner) {
+                QRScannerSheet { scannedCode in
+                    if let profile = try? VPNProfile.imported(from: scannedCode) {
+                        profiles.add(profile)
+                    }
+                }
+            }
         }
     }
 
