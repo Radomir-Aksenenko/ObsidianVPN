@@ -3,157 +3,332 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="theme-color" content="#090a09" />
-    <title>Obsidian — iPhone preview</title>
+    <meta name="theme-color" content="#0a0d0f" />
+    <title>Obsidian — Apple iOS 26+ Liquid Glass Preview</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <main class="device" aria-label="Интерактивный прототип Obsidian для iPhone">
+    <main class="device" aria-label="Obsidian iOS 26+ Liquid Glass">
+      <div class="dynamic-island"></div>
+      
+      <header class="status-bar">
+        <time class="status-time">9:41</time>
+        <div class="status-icons">
+          <span class="cellular-bars">••••</span>
+          <span class="wifi-icon">􀙇</span>
+          <div class="battery"></div>
+        </div>
+      </header>
+
       <div class="app-shell">
+        <!-- Native Apple Navigation Bar -->
         <header class="topbar">
-          <div class="brand"><span class="brand-mark"></span><span>OBSIDIAN</span><em>CONTROL</em></div>
-          <button class="icon-button profile-button" id="quickAdd" aria-label="Добавить профиль">RA</button>
+          <div class="brand">
+            <span class="brand-hexagon"></span>
+            <span class="brand-title">CORE</span>
+          </div>
+          <div class="nav-center-title">Obsidian</div>
+          <div class="topbar-actions">
+            <button class="glass-icon-btn" id="qrButton" aria-label="Сканировать QR">
+              <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M3 9V5a2 2 0 0 1 2-2h4M15 3h4a2 2 0 0 1 2 2v4M21 15v4a2 2 0 0 1-2 2h-4M9 21H5a2 2 0 0 1-2-2v-4"/><rect x="7" y="7" width="10" height="10" rx="1.5"/></svg>
+            </button>
+            <button class="glass-icon-btn" id="quickAdd" aria-label="Добавить сервер">
+              <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            </button>
+          </div>
         </header>
 
+        <!-- Screen 1: Home View -->
         <section class="screen active" data-screen="home" aria-labelledby="homeTitle">
-          <div class="home-content dashboard-home">
-            <div class="dashboard-heading">
-              <div><span class="eyebrow">Туннель / личное устройство</span><h1 id="homeTitle">Не подключено</h1><p id="connectionSubtitle">Трафик идёт напрямую</p></div>
-              <span class="state-led" aria-hidden="true"></span>
+          <div class="home-content">
+            
+            <!-- 1. Apple Dynamic Status Capsule -->
+            <div class="status-capsule" id="statusCapsule">
+              <span class="status-dot" id="statusDot"></span>
+              <span class="status-capsule-text" id="statusCapsuleText">ГОТОВ К РАБОТЕ</span>
+              <span class="status-capsule-divider">·</span>
+              <span class="status-capsule-mtu">1280 MTU</span>
             </div>
 
-            <article class="tunnel-console">
-              <button class="server-inline" id="selectedServer" aria-label="Выбрать сервер">
-                <span class="country-badge" id="selectedCode">FI</span>
-                <span class="server-copy"><strong id="selectedCity">Хельсинки</strong><small><span id="selectedEndpoint">fi.obsidian.test:443</span><i></i><span id="selectedLatency">42 мс</span></small></span>
-                <span class="chevron">›</span>
+            <!-- 2. Hero Centerpiece: Enormous Liquid Glass Bubble -->
+            <div class="liquid-hero-section">
+              <div class="bubble-ambient-bloom" id="ambientBloom"></div>
+              <div class="bubble-shockwave-ring" id="shockwaveRing"></div>
+              
+              <button class="enormous-liquid-bubble" id="connectButton" aria-label="Активировать VPN-туннель">
+                <!-- Outer Prismatic Chromatic Rim -->
+                <div class="chromatic-dispersion-rim"></div>
+                
+                <!-- Internal Rotating Fluid Vortex -->
+                <div class="subsurface-vortex" id="subsurfaceVortex"></div>
+                
+                <!-- Optical Frosted Glass Core -->
+                <div class="frosted-glass-refraction"></div>
+                <div class="inner-radial-gleam"></div>
+
+                <!-- Active Progress Ring -->
+                <svg class="active-progress-ring" viewBox="0 0 248 248">
+                  <circle cx="124" cy="124" r="102" class="ring-track"></circle>
+                  <circle cx="124" cy="124" r="102" class="ring-fill" id="progressRing"></circle>
+                </svg>
+
+                <!-- Specular Glints -->
+                <div class="convex-specular-glint"></div>
+                <div class="ground-bounce-reflection"></div>
+
+                <!-- Center Interactive Glyph & Typography -->
+                <div class="bubble-center-content">
+                  <div class="bubble-symbol-wrap" id="bubbleSymbol">
+                    <!-- Power / Lock Shield SVG -->
+                    <svg class="glyph-power" viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></svg>
+                    <svg class="glyph-shield" viewBox="0 0 24 24" width="40" height="40" fill="currentColor" stroke="none" style="display:none;"><path d="M12 2L4 5v6.09c0 5.05 3.41 9.76 8 10.91 4.59-1.15 8-5.86 8-10.91V5l-8-3zm-1 14l-3.5-3.5 1.41-1.41L11 13.17l5.59-5.59 1.41 1.41L11 16z"/></svg>
+                  </div>
+                  <strong class="bubble-action-title" id="connectLabel">ПОДКЛЮЧИТЬ</strong>
+                  <div class="bubble-status-subtitle">
+                    <span class="bubble-mini-dot" id="bubbleMiniDot"></span>
+                    <span id="bubbleStatusText">Obsidian Core</span>
+                  </div>
+                </div>
               </button>
-              <div class="tunnel-rule"></div>
-              <div class="tunnel-action-row">
-                <div class="protocol-copy"><span>ПРОТОКОЛ</span><strong>REALITY · UDP</strong><small>IPv4 · SNI microsoft.com</small></div>
-                <button class="connection-orb" id="connectButton" aria-label="Подключить VPN"><span class="orb-ring"></span><span class="power-glyph" aria-hidden="true"></span><strong id="connectLabel">Пуск</strong></button>
+            </div>
+
+            <!-- 3. Apple Glass Server Card -->
+            <button class="apple-glass-card server-glass-card" id="selectedServer" aria-label="Выбрать сервер">
+              <div class="country-squircle">
+                <span id="selectedCode">FI</span>
               </div>
-            </article>
+              <div class="server-meta">
+                <strong id="selectedCity">Хельсинки</strong>
+                <span class="server-ep" id="selectedEndpoint">fi.obsidian.test:443</span>
+              </div>
+              <div class="latency-chip">
+                <span class="latency-dot"></span>
+                <span id="selectedLatency">42 ms</span>
+              </div>
+              <svg class="glass-chevron" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="9 18 15 12 9 6"/></svg>
+            </button>
 
-            <div class="metrics" aria-label="Показатели подключения">
-              <div><span class="metric-label">RX</span><strong id="speedMetric">—</strong></div>
-              <div><span class="metric-label">СЕССИЯ</span><strong id="sessionMetric">—</strong></div>
-              <div><span class="metric-label">МАРШРУТ</span><strong id="routeMetric">DIRECT</strong></div>
+            <!-- 4. Apple 3-Tile Telemetry Dashboard -->
+            <div class="telemetry-dashboard">
+              <div class="telemetry-tile apple-glass-card">
+                <div class="tile-header">
+                  <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="10"/><polyline points="8 12 12 16 16 12"/><line x1="12" y1="8" x2="12" y2="16"/></svg>
+                  <span>Скорость</span>
+                </div>
+                <strong id="speedMetric">0 Б/с</strong>
+              </div>
+
+              <div class="telemetry-tile apple-glass-card" id="pingTile" role="button">
+                <div class="tile-header">
+                  <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+                  <span>Пинг</span>
+                </div>
+                <strong id="pingMetric">42 мс</strong>
+              </div>
+
+              <div class="telemetry-tile apple-glass-card">
+                <div class="tile-header">
+                  <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                  <span>Сессия</span>
+                </div>
+                <strong id="sessionMetric">00:00:00</strong>
+              </div>
             </div>
 
-            <div class="section-kicker"><span>Быстрые действия</span><i></i></div>
-            <div class="command-grid">
-              <button data-jump="access"><span class="command-symbol">⌘</span><strong>Выдать доступ</strong><small>3 активных ключа</small></button>
-              <button data-jump="admin"><span class="command-symbol">↯</span><strong>Управлять VPS</strong><small>1 сервер онлайн</small></button>
+            <!-- 5. Apple Quick Action Bar -->
+            <div class="quick-actions-bar">
+              <button class="quick-action-pill" id="actionMeasurePing">
+                <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                <span>Замер пинга</span>
+              </button>
+              <button class="quick-action-pill" id="actionProtocol">
+                <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                <span>Протокол</span>
+              </button>
+              <button class="quick-action-pill" id="actionLogs">
+                <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+                <span>Журнал</span>
+              </button>
             </div>
 
-            <div class="activity-line"><span class="activity-dot"></span><p><strong>Stockholm-01</strong> отвечает · 51 мс</p><time>сейчас</time></div>
+            <!-- 6. Foldable Glass Network Console -->
+            <div class="apple-glass-card logs-card" id="logsCard">
+              <button class="logs-header-btn" id="logsToggleBtn">
+                <div class="logs-title">
+                  <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+                  <span>Сетевой журнал</span>
+                </div>
+                <svg class="logs-chevron" id="logsChevron" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
+              </button>
+              <div class="logs-content" id="logsContent">
+                <div class="logs-actions">
+                  <button id="copyLogs">Скопировать</button>
+                  <span>·</span>
+                  <button id="clearLogs">Очистить</button>
+                </div>
+                <div class="logs-terminal" id="logsTerminal">
+                  <p class="log-entry log-ok">[OK] Obsidian Reality Engine инициализирован</p>
+                  <p class="log-entry">[NET] Шлюз: 1280 MTU · ChaCha20-Poly1305</p>
+                  <p class="log-entry log-accent">[INFO] Выбран сервер Хельсинки (42 ms)</p>
+                </div>
+              </div>
+            </div>
+
           </div>
         </section>
 
+        <!-- Screen 2: Servers List -->
         <section class="screen" data-screen="servers" aria-labelledby="serversTitle">
           <div class="section-heading">
-            <div><p>Инфраструктура</p><h1 id="serversTitle">Серверы</h1></div>
-            <div class="heading-actions"><button class="text-action" id="deployServer">Развернуть VPS</button><button class="round-action" id="addServer" aria-label="Добавить сервер">+</button></div>
+            <h1 id="serversTitle">Серверы</h1>
+            <button class="glass-icon-btn" id="addServer"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+          </div>
+          <div class="search-box-wrap">
+            <div class="glass-search-field">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+              <input type="text" id="searchInput" placeholder="Поиск серверов и локаций" />
+            </div>
           </div>
           <div class="server-list" id="serverList"></div>
-          <p class="list-note">Импортированные профили и собственные VPS</p>
         </section>
 
-        <section class="screen" data-screen="access" aria-labelledby="accessTitle">
-          <div class="section-heading"><div><p>Администрирование</p><h1 id="accessTitle">Доступы</h1></div><button class="round-action" id="issueAccess" aria-label="Выпустить ключ">+</button></div>
-          <div class="access-summary"><div><strong id="accessCount">3</strong><span>активных</span></div><i></i><div><strong>5</strong><span>устройств</span></div><i></i><div><strong>0</strong><span>просрочено</span></div></div>
-          <div class="section-kicker padded"><span>Выданные ключи</span><i></i></div>
-          <div class="access-list" id="accessList"></div>
-        </section>
-
-        <section class="screen" data-screen="admin" aria-labelledby="adminTitle">
-          <div class="section-heading"><div><p>Control plane</p><h1 id="adminTitle">Управление</h1></div><button class="round-action deploy-round" id="deployServerAdmin" aria-label="Развернуть VPS">↗</button></div>
-          <article class="fleet-card">
-            <div class="fleet-top"><span class="vps-monogram">VPS</span><div><strong>Stockholm-01</strong><small>root@91.204.12.44:22</small></div><span class="online-label">ONLINE</span></div>
-            <div class="fleet-metrics"><div><span>Версия</span><strong>v0.1.0</strong></div><div><span>Задержка</span><strong>51 ms</strong></div><div><span>Ключи</span><strong id="fleetKeys">3</strong></div></div>
-            <button class="manage-primary" id="manageVps">Открыть управление VPS <span>›</span></button>
-          </article>
-          <div class="admin-action-list">
-            <button id="quickSni"><span class="admin-symbol">SNI</span><span><strong>Маскировка</strong><small>microsoft.com · REALITY :443</small></span><em>›</em></button>
-            <button id="quickUpdate"><span class="admin-symbol">FW</span><span><strong>Ядро сервера</strong><small>Актуальная версия v0.1.0</small></span><b>OK</b></button>
-            <button id="quickNetwork"><span class="admin-symbol">IP</span><span><strong>Сетевой стек</strong><small>Чистый IPv4 · 370+ Мбит/с</small></span><em>›</em></button>
+        <!-- Screen 3: Settings -->
+        <section class="screen" data-screen="settings" aria-labelledby="settingsTitle">
+          <div class="section-heading">
+            <h1 id="settingsTitle">Настройки</h1>
           </div>
-          <div class="settings-group compact-settings">
-            <label class="setting-row single"><span><strong>Автоподключение клиента</strong></span><input type="checkbox" id="autoConnect" /><i class="switch"></i></label>
-            <label class="setting-row single"><span><strong>Не обходить VPN-туннель</strong></span><input type="checkbox" id="killSwitch" checked /><i class="switch"></i></label>
-            <label class="setting-row single"><span><strong>Тактильные отклики</strong></span><input type="checkbox" id="haptics" checked /><i class="switch"></i></label>
+          <div class="settings-group apple-glass-card">
+            <span class="group-title">Подключение</span>
+            <label class="setting-row">
+              <div class="setting-info">
+                <strong>Автоподключение</strong>
+                <small>Включать туннель при запуске системы</small>
+              </div>
+              <input type="checkbox" id="autoConnect" />
+              <i class="switch"></i>
+            </label>
+            <label class="setting-row">
+              <div class="setting-info">
+                <strong>Блокировка трафика без VPN</strong>
+                <small>Предотвращает утечку данных при разрыве</small>
+              </div>
+              <input type="checkbox" id="killSwitch" checked />
+              <i class="switch"></i>
+            </label>
+          </div>
+
+          <div class="settings-group apple-glass-card">
+            <span class="group-title">Интерфейс</span>
+            <label class="setting-row">
+              <div class="setting-info">
+                <strong>Тактильный отклик (Haptics)</strong>
+                <small>Микро-вибрации при работе с Liquid Glass</small>
+              </div>
+              <input type="checkbox" id="haptics" checked />
+              <i class="switch"></i>
+            </label>
+          </div>
+
+          <div class="settings-group apple-glass-card">
+            <span class="group-title">Приватность и безопасность</span>
+            <div class="setting-row-static">
+              <span>Хранение ключей</span>
+              <strong class="accent-text">Keychain на устройстве</strong>
+            </div>
+            <div class="setting-row-static">
+              <span>Журнал сайтов и DNS</span>
+              <span>Не ведётся</span>
+            </div>
+            <div class="setting-row-static">
+              <span>Размер MTU</span>
+              <span class="mono-text">1280 байт</span>
+            </div>
+          </div>
+
+          <div class="settings-group apple-glass-card">
+            <span class="group-title">О программе</span>
+            <div class="setting-row-static">
+              <span>Архитектура</span>
+              <span>Obsidian Reality Core</span>
+            </div>
+            <div class="setting-row-static">
+              <span>Спецификация</span>
+              <span>Liquid Glass iOS 26+</span>
+            </div>
+            <div class="setting-row-static">
+              <span>Версия клиента</span>
+              <span>1.0.0 (Build 26)</span>
+            </div>
           </div>
         </section>
 
+        <!-- Native Apple Tab Bar -->
         <nav class="tabbar" aria-label="Основная навигация">
-          <button class="tab active" data-target="home"><span class="tab-icon home-icon"></span><small>Туннель</small></button>
-          <button class="tab" data-target="servers"><span class="tab-icon nodes-icon"></span><small>Серверы</small></button>
-          <button class="tab" data-target="access"><span class="tab-icon key-icon"></span><small>Доступы</small></button>
-          <button class="tab" data-target="admin"><span class="tab-icon sliders-icon"></span><small>Control</small></button>
+          <button class="tab active" data-target="home">
+            <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M12 2L2 12h3v8h6v-6h2v6h6v-8h3L12 2z"/></svg>
+            <small>Главная</small>
+          </button>
+          <button class="tab" data-target="servers">
+            <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="2" y="3" width="20" height="6" rx="2"/><rect x="2" y="15" width="20" height="6" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
+            <small>Серверы</small>
+          </button>
+          <button class="tab" data-target="settings">
+            <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            <small>Настройки</small>
+          </button>
         </nav>
       </div>
 
+      <!-- Add Profile Modal Sheet -->
       <dialog id="profileDialog">
         <form method="dialog" id="profileForm">
           <div class="sheet-handle" aria-hidden="true"></div>
           <div class="sheet-header">
-            <div><span>Новый профиль</span><h2>Добавить сервер</h2></div>
-            <button value="cancel" class="close-button" aria-label="Закрыть">×</button>
+            <h2>Новый сервер</h2>
+            <button type="button" class="close-button" id="closeDialog" aria-label="Закрыть">✕</button>
           </div>
-          <label class="field-label" for="profileKey">Ключ доступа</label>
-          <textarea id="profileKey" placeholder="obsidian://…" spellcheck="false"></textarea>
-          <p class="field-help">Поддерживаются obsidian://, vpn:// и OBSDN-</p>
-          <button type="button" class="demo-key" id="fillDemo">Подставить тестовый ключ</button>
-          <button type="submit" class="primary-button" value="default">Сохранить сервер</button>
+          <label class="field-label" for="profileName">Название сервера (необязательно)</label>
+          <input type="text" id="profileName" class="sheet-input" placeholder="Например, Мой VPS" />
+          
+          <label class="field-label" for="profileKey">Ключ доступа (obsidian:// или vpn://)</label>
+          <textarea id="profileKey" placeholder="Вставьте ссылку доступа..."></textarea>
+          <div class="modal-quick-actions">
+            <button type="button" class="modal-pill-btn" id="modalQrScan">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M3 9V5a2 2 0 0 1 2-2h4M15 3h4a2 2 0 0 1 2 2v4M21 15v4a2 2 0 0 1-2 2h-4M9 21H5a2 2 0 0 1-2-2v-4"/></svg>
+              <span>QR-сканер</span>
+            </button>
+            <button type="button" class="modal-pill-btn" id="modalPasteKey">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/></svg>
+              <span>Вставить из буфера</span>
+            </button>
+          </div>
+          <button type="submit" class="primary-button" id="saveProfileBtn">Сохранить сервер</button>
         </form>
       </dialog>
 
-      <dialog id="issueDialog" class="admin-sheet">
-        <form method="dialog" id="issueForm">
-          <div class="sheet-handle"></div><div class="sheet-header"><div><span>Доступ</span><h2>Новый ключ</h2></div><button value="cancel" class="close-button" aria-label="Закрыть">×</button></div>
-          <label class="field-label" for="accessName">Имя или назначение</label><input class="sheet-input" id="accessName" value="Семья" />
-          <span class="field-label">Срок действия</span><div class="choice-row" id="daysChoice"><button type="button" data-days="7">7 дней</button><button type="button" data-days="30" class="active">30 дней</button><button type="button" data-days="90">90 дней</button><button type="button" data-days="0">∞</button></div>
-          <span class="field-label">Одновременных устройств</span><div class="stepper"><button type="button" id="devicesMinus">−</button><strong id="devicesCount">3</strong><button type="button" id="devicesPlus">+</button></div>
-          <button type="submit" class="primary-button">Выпустить ключ</button>
-        </form>
-      </dialog>
-
-      <dialog id="keyDialog" class="admin-sheet">
-        <form method="dialog" id="keyForm">
-          <div class="sheet-handle"></div><div class="sheet-header"><div><span>Клиентский доступ</span><h2 id="keyDetailName">Семья</h2></div><button value="cancel" class="close-button" aria-label="Закрыть">×</button></div>
-          <div class="key-status-card"><span class="access-avatar" id="keyDetailAvatar">СЕ</span><div><strong id="keyDetailStatus">Активен</strong><small id="keyDetailMeta">3 устройства · до 19 окт</small></div><i></i></div>
-          <label class="field-label" for="keyDetailValue">Ключ подключения</label>
-          <textarea id="keyDetailValue" class="key-value" readonly>obsidian://SE-DEMO-9K2M-7F4A-2026</textarea>
-          <div class="key-actions"><button type="button" class="secondary-button" id="copyAccessKey">Скопировать ключ</button><button type="button" class="secondary-button" id="showAccessQr">Показать QR</button></div>
-          <div class="qr-panel" id="qrPanel" hidden><div class="qr-demo" aria-label="Демонстрационный QR-код"></div><small>Отсканируйте камерой в приложении Obsidian</small></div>
-          <button type="button" class="danger-button" id="revokeAccess">Отозвать доступ</button>
-        </form>
-      </dialog>
-
-      <dialog id="deployDialog" class="admin-sheet">
-        <form method="dialog" id="deployForm">
-          <div class="sheet-handle"></div><div class="sheet-header"><div><span>Новый узел</span><h2>Развернуть VPS</h2></div><button value="cancel" class="close-button" aria-label="Закрыть">×</button></div>
-          <div class="deploy-progress"><i></i><i></i><i></i></div>
-          <div id="deployFields"><label class="field-label">IP-адрес сервера</label><input class="sheet-input" id="deployHost" value="203.0.113.42" /><div class="field-grid"><div><label class="field-label">Пользователь</label><input class="sheet-input" value="root" /></div><div><label class="field-label">SSH порт</label><input class="sheet-input" value="22" /></div></div><label class="field-label">Маскировка SNI</label><input class="sheet-input" value="www.microsoft.com" /><label class="field-label">Пароль root</label><input class="sheet-input" type="password" value="demo-password" /><button type="submit" class="primary-button">Начать установку</button></div>
-          <div id="deployRunning" hidden><div class="install-status"><span id="deployStage">Подключение по SSH…</span><strong id="deployPercent">8%</strong></div><div class="progress-track"><i id="deployBar"></i></div><pre id="deployLog">$ ssh root@203.0.113.42\nПроверка системы…</pre></div>
-        </form>
-      </dialog>
-
-      <dialog id="adminDialog" class="admin-sheet tall-sheet">
-        <form method="dialog" id="adminForm">
-          <div class="sheet-handle"></div><div class="sheet-header"><div><span>Stockholm-01 · ONLINE</span><h2>Управление VPS</h2></div><button value="cancel" class="close-button" aria-label="Закрыть">×</button></div>
-          <div class="admin-section"><div class="admin-section-head"><strong>Маскировка SNI</strong><span>REALITY :443</span></div><input class="sheet-input mono" id="sniInput" value="www.microsoft.com" /><div class="sni-presets"><button type="button">apple.com</button><button type="button">microsoft.com</button><button type="button">google.com</button></div><button type="button" class="secondary-button" id="applySni">Применить SNI</button></div>
-          <div class="admin-section"><div class="admin-section-head"><strong>Сетевой стек</strong><span id="networkMode">IPv4</span></div><label class="setting-row single"><span><strong>IPv6 Dual-Stack</strong><small>Включить маршрутизацию IPv6</small></span><input type="checkbox" id="ipv6Toggle" /><i class="switch"></i></label></div>
-          <div class="admin-section"><div class="admin-section-head"><strong>Ядро сервера</strong><span class="ok-state">v0.1.0 · актуально</span></div><button type="button" class="secondary-button" id="checkUpdate">Проверить обновления</button></div>
-          <div class="admin-section danger-zone"><div class="admin-section-head"><strong>Обнуление сервера</strong><span>опасная зона</span></div><p>Отзовёт клиентские ключи и создаст новый ключ владельца.</p><button type="button" class="danger-button" id="resetServer">Обнулить сервер</button></div>
+      <!-- Security Protocol Modal Sheet -->
+      <dialog id="protocolDialog">
+        <form method="dialog" id="protocolForm">
+          <div class="sheet-handle" aria-hidden="true"></div>
+          <div class="sheet-header">
+            <h2>Параметры защиты</h2>
+            <button type="button" class="close-button" id="closeProtocolDialog" aria-label="Закрыть">✕</button>
+          </div>
+          <div class="protocol-specs-list apple-glass-card">
+            <div class="spec-row"><span>Протокол</span><strong>Obsidian v1 / Reality</strong></div>
+            <div class="spec-row"><span>Шифрование данных</span><strong class="mono-text">ChaCha20-Poly1305 AEAD</strong></div>
+            <div class="spec-row"><span>Защита заголовков</span><strong class="mono-text">AES-ECB Header Masking</strong></div>
+            <div class="spec-row"><span>Размер кадра MTU</span><strong class="mono-text">1280 байт (Zero Drop)</strong></div>
+            <div class="spec-row"><span>Анти-DPI паддинг</span><strong class="mono-text">Dynamic Bucket Padding</strong></div>
+          </div>
+          <button type="button" class="primary-button" id="closeProtocolBtn">Закрыть</button>
         </form>
       </dialog>
 
       <div class="toast" id="toast" role="status" aria-live="polite"></div>
-      <div class="home-indicator" aria-hidden="true"></div>
+      <div class="home-indicator"></div>
     </main>
+
     <script src="app.js"></script>
-    <script src="admin.js"></script>
   </body>
 </html>

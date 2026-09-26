@@ -13,6 +13,7 @@ struct AddProfileView: View {
         NavigationStack {
             ZStack {
                 MineralBackground()
+
                 Form {
                     Section {
                         TextField("Название сервера (необязательно)", text: $customName)
@@ -22,50 +23,83 @@ struct AddProfileView: View {
                     } footer: {
                         Text("Если оставить пустым, имя определится автоматически из адреса сервера.")
                     }
+                    .listRowBackground(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(.ultraThinMaterial.opacity(0.65))
+                    )
 
                     Section {
                         TextEditor(text: $key)
                             .font(.system(.callout, design: .monospaced))
-                            .frame(minHeight: 120)
+                            .frame(minHeight: 110)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                             .accessibilityLabel("Ключ доступа")
-                            .onChange(of: key) { newValue in
+                            .onChange(of: key) { _, newValue in
                                 autoDetectName(from: newValue)
                             }
 
-                        Button {
-                            showScanner = true
-                        } label: {
-                            Label("Сканировать QR-код", systemImage: "qrcode.viewfinder")
-                        }
-
-                        Button {
-                            if let pasted = UIPasteboard.general.string {
-                                key = pasted
-                                autoDetectName(from: pasted)
+                        HStack(spacing: 12) {
+                            Button {
+                                showScanner = true
+                            } label: {
+                                Label("QR-сканер", systemImage: "qrcode.viewfinder")
+                                    .font(.system(.subheadline, design: .rounded, weight: .semibold))
                             }
-                        } label: {
-                            Label("Вставить из буфера", systemImage: "doc.on.clipboard")
+                            .buttonStyle(.bordered)
+                            .tint(ObsidianTheme.accent)
+
+                            Button {
+                                if let pasted = UIPasteboard.general.string {
+                                    key = pasted
+                                    autoDetectName(from: pasted)
+                                }
+                            } label: {
+                                Label("Вставить", systemImage: "doc.on.clipboard")
+                                    .font(.system(.subheadline, design: .rounded, weight: .semibold))
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(Color.white.opacity(0.85))
                         }
+                        .padding(.vertical, 4)
                     } header: {
                         Text("Ключ доступа")
                     } footer: {
                         Text("Поддерживаются ссылки obsidian:// и vpn://, а также короткие ключи OBSDN-.")
                     }
+                    .listRowBackground(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(.ultraThinMaterial.opacity(0.65))
+                    )
 
                     if let errorMessage {
                         Section {
                             Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                                .font(.footnote)
                                 .foregroundStyle(ObsidianTheme.danger)
                         }
+                        .listRowBackground(
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .fill(ObsidianTheme.danger.opacity(0.12))
+                        )
                     }
 
                     Section {
-                        Button("Сохранить сервер") { save() }
-                            .frame(maxWidth: .infinity)
-                            .disabled(key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        Button {
+                            save()
+                        } label: {
+                            Text("Сохранить сервер")
+                                .font(.system(.body, design: .rounded, weight: .bold))
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 4)
+                        }
+                        .disabled(key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .tint(ObsidianTheme.accent)
                     }
+                    .listRowBackground(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Color.white.opacity(0.04) : ObsidianTheme.accent.opacity(0.20))
+                    )
                 }
                 .scrollContentBackground(.hidden)
             }
@@ -74,6 +108,7 @@ struct AddProfileView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Отмена") { dismiss() }
+                        .foregroundStyle(ObsidianTheme.secondaryText)
                 }
             }
             .sheet(isPresented: $showScanner) {

@@ -5,10 +5,13 @@ struct HomeView: View {
     @EnvironmentObject private var profiles: ProfileStore
     @EnvironmentObject private var tunnel: TunnelController
     @AppStorage("settings.haptics", store: UserDefaults(suiteName: "group.com.obsidian.vpn")) private var haptics = true
+
     @State private var showImport = false
     @State private var showScanner = false
     @State private var showLogs = false
     @State private var showSecurityDetails = false
+    @State private var isServerCardPressed = false
+
     @StateObject private var logStore = LogStore.shared
     @StateObject private var pingService = PingService.shared
 
@@ -20,17 +23,17 @@ struct HomeView: View {
                 MineralBackground()
 
                 ScrollView {
-                    VStack(spacing: 24) {
+                    VStack(spacing: 26) {
                         // 1. Apple Dynamic Status Capsule
                         statusCapsule
-                            .padding(.top, 10)
+                            .padding(.top, 8)
 
-                        // 2. Centerpiece: Liquid Glass Activation Orb
+                        // 2. Hero Centerpiece: Enormous Liquid Glass Bubble
                         ConnectionOrb(state: tunnel.state) {
-                            triggerHaptic()
+                            triggerHaptic(.medium)
                             Task { await tunnel.toggle(profile: profiles.selectedProfile) }
                         }
-                        .padding(.top, 12)
+                        .padding(.vertical, 8)
 
                         // 3. Apple Glass Server Card
                         serverCard
@@ -48,7 +51,7 @@ struct HomeView: View {
 
                         // 6. Foldable Glass Network Console
                         logsDrawer
-                            .padding(.bottom, 24)
+                            .padding(.bottom, 28)
                     }
                     .padding(.horizontal, 20)
                 }
@@ -58,30 +61,29 @@ struct HomeView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Image(systemName: "hexagon.fill")
-                        .font(.system(size: 18))
-                        .foregroundStyle(tunnel.state == .connected ? ObsidianTheme.accent : ObsidianTheme.primaryText.opacity(0.8))
-                        .accessibilityHidden(true)
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    HStack(spacing: 16) {
-                        Button {
-                            triggerHaptic()
-                            showScanner = true
-                        } label: {
-                            Image(systemName: "qrcode.viewfinder")
-                                .font(.system(size: 17, weight: .semibold))
-                        }
-                        .accessibilityLabel("Сканировать QR-код")
+                    HStack(spacing: 6) {
+                        Image(systemName: "hexagon.fill")
+                            .font(.system(size: 16))
+                            .foregroundStyle(tunnel.state == .connected ? ObsidianTheme.accent : ObsidianTheme.primaryText.opacity(0.85))
+                            .shadow(color: tunnel.state == .connected ? ObsidianTheme.accent.opacity(0.6) : .clear, radius: 6)
 
-                        Button {
-                            triggerHaptic()
-                            showImport = true
-                        } label: {
-                            Image(systemName: "plus")
-                                .font(.system(size: 17, weight: .semibold))
+                        Text("CORE")
+                            .font(.system(size: 11, weight: .bold, design: .rounded))
+                            .foregroundStyle(ObsidianTheme.tertiaryText)
+                            .tracking(1.0)
+                    }
+                    .accessibilityHidden(true)
+                }
+
+                ToolbarItem(placement: .topBarTrailing) {
+                    HStack(spacing: 12) {
+                        toolbarGlassButton(icon: "qrcode.viewfinder", label: "Сканировать QR") {
+                            showScanner = true
                         }
-                        .accessibilityLabel("Добавить сервер")
+
+                        toolbarGlassButton(icon: "plus", label: "Добавить сервер") {
+                            showImport = true
+                        }
                     }
                 }
             }
@@ -91,10 +93,10 @@ struct HomeView: View {
                     do {
                         let profile = try VPNProfile.imported(from: scannedCode)
                         profiles.add(profile)
-                        logStore.log("QR успешно распознан: \(profile.name)")
+                        logStore.log("[OK] QR успешно распознан: \(profile.name)")
                         pingCurrentServer()
                     } catch {
-                        logStore.log("Ошибка формата QR: \(error.localizedDescription)")
+                        logStore.log("[FAIL] Ошибка формата QR: \(error.localizedDescription)")
                     }
                 }
             }
@@ -121,13 +123,13 @@ struct HomeView: View {
         HStack(spacing: 8) {
             Circle()
                 .fill(statusDotColor)
-                .frame(width: 8, height: 8)
-                .shadow(color: statusDotColor.opacity(0.8), radius: 4)
+                .frame(width: 7.5, height: 7.5)
+                .shadow(color: statusDotColor.opacity(0.85), radius: 5)
 
             Text(statusTitle.uppercased())
                 .font(.system(size: 11, weight: .bold, design: .rounded))
                 .foregroundStyle(ObsidianTheme.primaryText)
-                .tracking(0.8)
+                .tracking(0.9)
 
             Text("·")
                 .font(.system(size: 11, weight: .bold))
@@ -141,8 +143,17 @@ struct HomeView: View {
         .padding(.vertical, 7)
         .background(.ultraThinMaterial, in: Capsule())
         .overlay {
-            Capsule().stroke(Color.white.opacity(0.14), lineWidth: 1)
+            Capsule()
+                .stroke(
+                    LinearGradient(
+                        colors: [Color.white.opacity(0.24), Color.white.opacity(0.06)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    ),
+                    lineWidth: 1
+                )
         }
+        .shadow(color: Color.black.opacity(0.25), radius: 10, y: 4)
     }
 
     private var statusDotColor: Color {
@@ -150,7 +161,7 @@ struct HomeView: View {
         case .connected: return ObsidianTheme.accent
         case .preparing, .disconnecting: return ObsidianTheme.amber
         case .failed: return ObsidianTheme.danger
-        case .disconnected: return Color.white.opacity(0.4)
+        case .disconnected: return Color.white.opacity(0.38)
         }
     }
 
@@ -168,32 +179,39 @@ struct HomeView: View {
 
     private var serverCard: some View {
         Button {
-            triggerHaptic()
+            triggerHaptic(.light)
             if profiles.profiles.isEmpty { showImport = true }
             else { openServers() }
         } label: {
             HStack(spacing: 16) {
-                // Flag / Country Squircle
+                // Flag / Country Squircle with liquid glass highlight
                 ZStack {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    RoundedRectangle(cornerRadius: 15, style: .continuous)
                         .fill(
                             LinearGradient(
                                 colors: [
-                                    (tunnel.state == .connected ? ObsidianTheme.accent : Color.white).opacity(0.18),
+                                    (tunnel.state == .connected ? ObsidianTheme.accent : Color.white).opacity(0.20),
                                     Color.white.opacity(0.04)
                                 ],
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing
                             )
                         )
-                        .frame(width: 48, height: 48)
+                        .frame(width: 50, height: 50)
                         .overlay {
-                            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                            RoundedRectangle(cornerRadius: 15, style: .continuous)
+                                .stroke(
+                                    LinearGradient(
+                                        colors: [Color.white.opacity(0.30), Color.white.opacity(0.08)],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    ),
+                                    lineWidth: 1
+                                )
                         }
 
                     Text(profiles.selectedProfile?.countryCode ?? "+")
-                        .font(.system(size: 15, weight: .bold, design: .rounded))
+                        .font(.system(size: 16, weight: .bold, design: .rounded))
                         .foregroundStyle(tunnel.state == .connected ? ObsidianTheme.accent : ObsidianTheme.primaryText)
                 }
 
@@ -203,31 +221,31 @@ struct HomeView: View {
                         .foregroundStyle(ObsidianTheme.primaryText)
                         .lineLimit(1)
 
-                    HStack(spacing: 6) {
-                        Text(profiles.selectedProfile?.endpoint ?? "Нажмите для добавления ключа")
-                            .font(.system(size: 13, weight: .regular, design: .monospaced))
-                            .foregroundStyle(ObsidianTheme.secondaryText)
-                            .lineLimit(1)
-                    }
+                    Text(profiles.selectedProfile?.endpoint ?? "Нажмите для добавления ключа доступа")
+                        .font(.system(size: 12.5, weight: .regular, design: .monospaced))
+                        .foregroundStyle(ObsidianTheme.secondaryText)
+                        .lineLimit(1)
                 }
 
                 Spacer()
 
-                // Ping Latency Pill
+                // Ping Latency Chip
                 if let latency = pingService.latencyMs, profiles.selectedProfile != nil {
-                    HStack(spacing: 4) {
+                    HStack(spacing: 5) {
                         Circle()
                             .fill(latencyColor(latency))
                             .frame(width: 6, height: 6)
+                            .shadow(color: latencyColor(latency).opacity(0.7), radius: 3)
+
                         Text("\(latency) ms")
-                            .font(.system(size: 11, weight: .semibold, design: .rounded))
-                            .foregroundStyle(ObsidianTheme.primaryText.opacity(0.9))
+                            .font(.system(size: 11.5, weight: .semibold, design: .rounded))
+                            .foregroundStyle(ObsidianTheme.primaryText.opacity(0.92))
                     }
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 5)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5.5)
                     .background(Color.white.opacity(0.08), in: Capsule())
                     .overlay {
-                        Capsule().stroke(Color.white.opacity(0.1), lineWidth: 0.8)
+                        Capsule().stroke(Color.white.opacity(0.12), lineWidth: 0.8)
                     }
                 } else if pingService.isPinging {
                     ProgressView()
@@ -243,7 +261,14 @@ struct HomeView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .appleGlassCard(cornerRadius: 22, highlight: 0.22)
+        .appleGlassCard(cornerRadius: 22, highlight: 0.24)
+        .scaleEffect(isServerCardPressed ? 0.98 : 1.0)
+        .animation(.fluidSpring, value: isServerCardPressed)
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in isServerCardPressed = true }
+                .onEnded { _ in isServerCardPressed = false }
+        )
     }
 
     private func latencyColor(_ ms: Int) -> Color {
@@ -266,7 +291,7 @@ struct HomeView: View {
 
             // Ping Tile
             Button {
-                triggerHaptic()
+                triggerHaptic(.light)
                 pingCurrentServer()
             } label: {
                 telemetryTile(
@@ -294,7 +319,7 @@ struct HomeView: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Image(systemName: icon)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(accent)
                 Text(title)
                     .font(.system(size: 11, weight: .medium, design: .rounded))
@@ -305,12 +330,13 @@ struct HomeView: View {
                 .font(.system(size: 15, weight: .bold, design: .rounded))
                 .monospacedDigit()
                 .foregroundStyle(ObsidianTheme.primaryText)
+                .contentTransition(.numericText())
                 .lineLimit(1)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
-        .appleGlassCard(cornerRadius: 18, highlight: 0.16)
+        .appleGlassCard(cornerRadius: 18, highlight: 0.18)
     }
 
     private var speedText: String {
@@ -343,7 +369,7 @@ struct HomeView: View {
             }
 
             quickActionButton(label: "Журнал", icon: showLogs ? "chevron.up" : "terminal.fill") {
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                withAnimation(.fluidSpring) {
                     showLogs.toggle()
                 }
             }
@@ -352,7 +378,7 @@ struct HomeView: View {
 
     private func quickActionButton(label: String, icon: String, action: @escaping () -> Void) -> some View {
         Button {
-            triggerHaptic()
+            triggerHaptic(.light)
             action()
         } label: {
             HStack(spacing: 6) {
@@ -361,13 +387,21 @@ struct HomeView: View {
                 Text(label)
                     .font(.system(size: 12, weight: .semibold, design: .rounded))
             }
-            .foregroundStyle(ObsidianTheme.primaryText.opacity(0.9))
+            .foregroundStyle(ObsidianTheme.primaryText.opacity(0.92))
             .padding(.horizontal, 12)
-            .padding(.vertical, 9)
+            .padding(.vertical, 9.5)
             .frame(maxWidth: .infinity)
             .background(.ultraThinMaterial, in: Capsule())
             .overlay {
-                Capsule().stroke(Color.white.opacity(0.12), lineWidth: 1)
+                Capsule()
+                    .stroke(
+                        LinearGradient(
+                            colors: [Color.white.opacity(0.20), Color.white.opacity(0.04)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        ),
+                        lineWidth: 1
+                    )
             }
         }
         .buttonStyle(.plain)
@@ -378,7 +412,7 @@ struct HomeView: View {
     private var logsDrawer: some View {
         VStack(alignment: .leading, spacing: 10) {
             Button {
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                withAnimation(.fluidSpring) {
                     showLogs.toggle()
                 }
             } label: {
@@ -399,7 +433,7 @@ struct HomeView: View {
                     HStack {
                         Spacer()
                         Button("Скопировать") {
-                            triggerHaptic()
+                            triggerHaptic(.light)
                             UIPasteboard.general.string = logStore.entries.joined(separator: "\n")
                         }
                         .font(.caption2.weight(.semibold))
@@ -408,7 +442,7 @@ struct HomeView: View {
                         Text("·").foregroundStyle(ObsidianTheme.tertiaryText)
 
                         Button("Очистить") {
-                            triggerHaptic()
+                            triggerHaptic(.light)
                             logStore.clear()
                         }
                         .font(.caption2)
@@ -419,7 +453,7 @@ struct HomeView: View {
                         ScrollView {
                             LazyVStack(alignment: .leading, spacing: 4) {
                                 if logStore.entries.isEmpty {
-                                    Text("Ожидание сетевых событий...")
+                                    Text("[INFO] Ожидание сетевых событий...")
                                         .font(.system(.caption2, design: .monospaced))
                                         .foregroundStyle(ObsidianTheme.secondaryText.opacity(0.6))
                                 } else {
@@ -439,7 +473,7 @@ struct HomeView: View {
                         .overlay {
                             RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.08), lineWidth: 1)
                         }
-                        .onChange(of: logStore.entries.count) { _ in
+                        .onChange(of: logStore.entries.count) { _, _ in
                             if let last = logStore.entries.indices.last {
                                 withAnimation { proxy.scrollTo(last, anchor: .bottom) }
                             }
@@ -450,19 +484,42 @@ struct HomeView: View {
             }
         }
         .padding(14)
-        .appleGlassCard(cornerRadius: 20, highlight: 0.14)
+        .appleGlassCard(cornerRadius: 20, highlight: 0.16)
     }
 
     private func logColor(for entry: String) -> Color {
-        if entry.contains("ОШИБКА") || entry.contains("Сбой") || entry.contains("failed") {
+        if entry.contains("[FAIL]") || entry.contains("ОШИБКА") || entry.contains("Сбой") || entry.contains("failed") {
             return ObsidianTheme.danger
-        } else if entry.contains("успешно") || entry.contains("Подключено") || entry.contains("active") {
+        } else if entry.contains("[OK]") || entry.contains("успешно") || entry.contains("Подключено") || entry.contains("active") {
             return ObsidianTheme.accent
         } else if entry.contains("Добавлен") || entry.contains("Выбран") {
             return ObsidianTheme.accentCyan
         } else {
-            return ObsidianTheme.primaryText.opacity(0.8)
+            return ObsidianTheme.primaryText.opacity(0.85)
         }
+    }
+
+    // MARK: - Toolbar Helper
+
+    private func toolbarGlassButton(icon: String, label: String, action: @escaping () -> Void) -> some View {
+        Button {
+            triggerHaptic(.light)
+            action()
+        } label: {
+            ZStack {
+                Circle()
+                    .fill(.ultraThinMaterial)
+                    .frame(width: 34, height: 34)
+                    .overlay {
+                        Circle().stroke(Color.white.opacity(0.18), lineWidth: 1)
+                    }
+
+                Image(systemName: icon)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(ObsidianTheme.primaryText)
+            }
+        }
+        .accessibilityLabel(label)
     }
 
     // MARK: - Security Modal
@@ -471,14 +528,17 @@ struct HomeView: View {
         NavigationStack {
             ZStack {
                 MineralBackground()
-                VStack(spacing: 20) {
+                VStack(spacing: 22) {
                     VStack(spacing: 8) {
                         Image(systemName: "lock.shield.fill")
-                            .font(.system(size: 52))
+                            .font(.system(size: 54))
                             .foregroundStyle(ObsidianTheme.accent)
+                            .shadow(color: ObsidianTheme.accent.opacity(0.5), radius: 16)
+
                         Text("Obsidian Reality Engine")
                             .font(.system(.title3, design: .rounded, weight: .bold))
                             .foregroundStyle(ObsidianTheme.primaryText)
+
                         Text("Шифрование следующего поколения для защиты мобильного трафика")
                             .font(.subheadline)
                             .foregroundStyle(ObsidianTheme.secondaryText)
@@ -494,16 +554,20 @@ struct HomeView: View {
                         securityRow(title: "Анти-DPI паддинг", value: "Dynamic Bucket Padding")
                     }
                     .padding(18)
-                    .appleGlassCard(cornerRadius: 20, highlight: 0.2)
+                    .appleGlassCard(cornerRadius: 20, highlight: 0.20)
 
                     Spacer()
 
-                    Button("Закрыть") { showSecurityDetails = false }
-                        .font(.headline)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 14)
-                        .background(ObsidianTheme.accent, in: RoundedRectangle(cornerRadius: 16))
-                        .foregroundStyle(Color.black)
+                    Button {
+                        showSecurityDetails = false
+                    } label: {
+                        Text("Закрыть")
+                            .font(.system(size: 16, weight: .semibold, design: .rounded))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 14)
+                            .background(ObsidianTheme.accent, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                            .foregroundStyle(Color.black)
+                    }
                 }
                 .padding(20)
             }
@@ -533,9 +597,10 @@ struct HomeView: View {
         }
     }
 
-    private func triggerHaptic() {
+    private func triggerHaptic(_ style: UIImpactFeedbackGenerator.FeedbackStyle) {
         guard haptics else { return }
-        let generator = UIImpactFeedbackGenerator(style: .light)
+        let generator = UIImpactFeedbackGenerator(style: style)
+        generator.prepare()
         generator.impactOccurred()
     }
 

@@ -8,20 +8,30 @@ struct RootView: View {
 
     var body: some View {
         TabView(selection: $selection) {
-            HomeView(openServers: { selection = .servers })
-                .tag(Destination.home)
-                .tabItem { Label("Главная", systemImage: "circle.hexagongrid.fill") }
+            HomeView(openServers: {
+                withAnimation(.fluidSpring) {
+                    selection = .servers
+                }
+            })
+            .tag(Destination.home)
+            .tabItem {
+                Label("Главная", systemImage: "circle.hexagongrid.fill")
+            }
 
             ServerListView()
                 .tag(Destination.servers)
-                .tabItem { Label("Серверы", systemImage: "point.3.connected.trianglepath.dotted") }
+                .tabItem {
+                    Label("Серверы", systemImage: "point.3.connected.trianglepath.dotted")
+                }
 
             SettingsView()
                 .tag(Destination.settings)
-                .tabItem { Label("Настройки", systemImage: "slider.horizontal.3") }
+                .tabItem {
+                    Label("Настройки", systemImage: "gearshape.fill")
+                }
         }
         .tint(ObsidianTheme.accent)
-        .toolbarBackground(ObsidianTheme.background.opacity(0.96), for: .tabBar)
+        .toolbarBackground(ObsidianTheme.background.opacity(0.92), for: .tabBar)
         .toolbarBackground(.visible, for: .tabBar)
         .task { await tunnel.prepare() }
     }
