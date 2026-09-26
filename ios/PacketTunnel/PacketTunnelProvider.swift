@@ -6,6 +6,124 @@ import Darwin
 import Obsidian
 #endif
 
+private struct ObsidianURIComponents {
+    var scheme: String = "obsidian"
+    var user: String? = nil
+    var host: String = ""
+    var port: Int? = nil
+    var queryItems: [String: String] = [:]
+    var fragment: String? = nil
+
+    var endpoint: String {
+        guard !host.isEmpty else { return "" }
+        if let port {
+            if host.contains(":") && !host.hasPrefix("[") {
+                return "[\(host)]:\(port)"
+            }
+            return "\(host):\(port)"
+        }
+        return host
+    }
+
+    static func parse(_ raw: String) -> ObsidianURIComponents? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        if trimmed.hasPrefix("OBSDN-") {
+            var comp = ObsidianURIComponents()
+            comp.scheme = "obsdn"
+            comp.host = "OBSDN Key"
+            comp.fragment = String(trimmed.prefix(20))
+            return comp
+        }
+
+        var work = trimmed
+        var scheme = "obsidian"
+        if let schemeColon = work.range(of: "://") {
+            scheme = String(work[..<schemeColon.lowerBound]).lowercased()
+            work = String(work[schemeColon.upperBound...])
+        } else if work.hasPrefix("vpn://") {
+            scheme = "vpn"
+            work = String(work.dropFirst(6))
+        }
+
+        if scheme == "vpn" && work.lowercased().hasPrefix("obsidian/") {
+            work = String(work.dropFirst(9))
+            scheme = "obsidian"
+        }
+
+        var fragment: String? = nil
+        if let hashIdx = work.firstIndex(of: "#") {
+            let rawFrag = String(work[work.index(after: hashIdx)...])
+            fragment = rawFrag.removingPercentEncoding ?? rawFrag
+            work = String(work[..<hashIdx])
+        }
+
+        var queryItems: [String: String] = [:]
+        if let qIdx = work.firstIndex(of: "?") {
+            let rawQuery = String(work[work.index(after: qIdx)...])
+            work = String(work[..<qIdx])
+            for pair in rawQuery.split(separator: "&") {
+                let parts = pair.split(separator: "=", maxSplits: 1).map(String.init)
+                if parts.count == 2 {
+                    let k = parts[0].removingPercentEncoding ?? parts[0]
+                    let v = parts[1].removingPercentEncoding ?? parts[1]
+                    queryItems[k] = v
+                } else if parts.count == 1 {
+                    let k = parts[0].removingPercentEncoding ?? parts[0]
+                    queryItems[k] = ""
+                }
+            }
+        }
+
+        while work.hasSuffix("/") {
+            work.removeLast()
+        }
+
+        var user: String? = nil
+        if let atIdx = work.lastIndex(of: "@") {
+            user = String(work[..<atIdx])
+            work = String(work[work.index(after: atIdx)...])
+        }
+
+        var host = ""
+        var port: Int? = nil
+
+        if work.hasPrefix("[") {
+            if let closeBracket = work.firstIndex(of: "]") {
+                host = String(work[work.index(after: work.startIndex)..<closeBracket])
+                let afterBracket = work[work.index(after: closeBracket)...]
+                if afterBracket.hasPrefix(":") {
+                    port = Int(afterBracket.dropFirst())
+                }
+            } else {
+                host = work
+            }
+        } else if let colonIdx = work.lastIndex(of: ":") {
+            let potentialPort = String(work[work.index(after: colonIdx)...])
+            if let p = Int(potentialPort) {
+                port = p
+                host = String(work[..<colonIdx])
+            } else {
+                host = work
+            }
+        } else {
+            host = work
+        }
+
+        host = host.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+
+        var result = ObsidianURIComponents()
+        result.scheme = scheme
+        result.user = user
+        result.host = host
+        result.port = port
+        result.queryItems = queryItems
+        result.fragment = fragment
+        return result
+    }
+}
+
 final class PacketTunnelProvider: NEPacketTunnelProvider {
     private let engine = ObsidianPacketEngine()
     private var isRunning = false
@@ -17,6 +135,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     ) {
         let sharedDefaults = UserDefaults(suiteName: "group.com.obsidian.vpn") ?? .standard
         sharedDefaults.removeObject(forKey: "lastTunnelError")
+        sharedDefaults.set(0, forKey: "vpn.stats.rx")
+        sharedDefaults.set(0, forKey: "vpn.stats.tx")
 
         tunnelLog("Запрос на запуск туннеля...")
 
@@ -60,7 +180,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let dns = NEDNSSettings(servers: ["1.1.1.1", "8.8.8.8"])
         dns.matchDomains = [""]
         settings.dnsSettings = dns
-        settings.mtu = 1420
+        // MTU 1280 ensures zero fragmentation and no PMTU black hole across any mobile APN (LTE/5G)
+        settings.mtu = 1280
 
         setTunnelNetworkSettings(settings) { [weak self] error in
             guard let self else { return }
@@ -72,9 +193,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 return
             }
 
-            tunnelLog("Сетевые настройки применены, запуск ядра Obsidian...")
+            tunnelLog("Сетевые настройки применены (MTU 1280), запуск ядра Obsidian...")
             do {
-                try self.engine.start(configURI: uri, mtu: 1420)
+                try self.engine.start(configURI: uri, mtu: 1280)
                 self.isRunning = true
                 self.readFromSystem()
                 self.readFromEngine()
@@ -91,7 +212,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     private func extractServerIP(from uri: String, fallback: String) -> String? {
         let host: String
-        if let components = URLComponents(string: uri), let h = components.host, !h.isEmpty {
+        if let parsed = ObsidianURIComponents.parse(uri), !parsed.host.isEmpty {
+            host = parsed.host
+        } else if let components = URLComponents(string: uri), let h = components.host, !h.isEmpty {
             host = h
         } else if !fallback.isEmpty {
             host = fallback
@@ -147,8 +270,15 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         guard isRunning else { return }
         packetFlow.readPackets { [weak self] packets, _ in
             guard let self, self.isRunning else { return }
+            var txBytes: Int = 0
             for packet in packets {
                 try? self.engine.inject(packet)
+                txBytes += packet.count
+            }
+            if txBytes > 0 {
+                let defaults = UserDefaults(suiteName: "group.com.obsidian.vpn") ?? .standard
+                let cur = defaults.integer(forKey: "vpn.stats.tx")
+                defaults.set(cur + txBytes, forKey: "vpn.stats.tx")
             }
             self.readFromSystem()
         }
@@ -157,11 +287,48 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private func readFromEngine() {
         receiveQueue.async { [weak self] in
             guard let self else { return }
+            var batchPackets: [Data] = []
+            var batchProtocols: [NSNumber] = []
+            batchPackets.reserveCapacity(64)
+            batchProtocols.reserveCapacity(64)
+
+            var lastStatsFlush = Date()
+            var localRxBytes: Int = 0
+
             while self.isRunning {
-                guard let packet = try? self.engine.receive(timeoutMilliseconds: 500), !packet.isEmpty else { continue }
-                let version = packet.first.map { $0 >> 4 } ?? 4
-                let family = NSNumber(value: version == 6 ? AF_INET6 : AF_INET)
-                self.packetFlow.writePackets([packet], withProtocols: [family])
+                guard let firstPacket = try? self.engine.receive(timeoutMilliseconds: 200), !firstPacket.isEmpty else {
+                    continue
+                }
+
+                batchPackets.removeAll(keepingCapacity: true)
+                batchProtocols.removeAll(keepingCapacity: true)
+
+                let firstVer = firstPacket.first.map({ $0 >> 4 }) ?? 4
+                batchPackets.append(firstPacket)
+                batchProtocols.append(NSNumber(value: firstVer == 6 ? AF_INET6 : AF_INET))
+                localRxBytes += firstPacket.count
+
+                // High-performance batch draining: pull up to 63 additional packets without waiting
+                while batchPackets.count < 64 {
+                    guard let nextPacket = try? self.engine.receive(timeoutMilliseconds: 0), !nextPacket.isEmpty else {
+                        break
+                    }
+                    let ver = nextPacket.first.map({ $0 >> 4 }) ?? 4
+                    batchPackets.append(nextPacket)
+                    batchProtocols.append(NSNumber(value: ver == 6 ? AF_INET6 : AF_INET))
+                    localRxBytes += nextPacket.count
+                }
+
+                self.packetFlow.writePackets(batchPackets, withProtocols: batchProtocols)
+
+                let now = Date()
+                if now.timeIntervalSince(lastStatsFlush) >= 1.0 {
+                    let defaults = UserDefaults(suiteName: "group.com.obsidian.vpn") ?? .standard
+                    let cur = defaults.integer(forKey: "vpn.stats.rx")
+                    defaults.set(cur + localRxBytes, forKey: "vpn.stats.rx")
+                    localRxBytes = 0
+                    lastStatsFlush = now
+                }
             }
         }
     }

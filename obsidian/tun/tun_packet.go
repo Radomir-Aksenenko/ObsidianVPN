@@ -64,6 +64,9 @@ func (p *PacketDevice) Write(b []byte) (int, error) {
 		return 0, io.ErrClosedPipe
 	case p.outQueue <- cp:
 		return len(b), nil
+	default:
+		// Queue full: drop packet rather than blocking network pipeline
+		return len(b), nil
 	}
 }
 
@@ -96,6 +99,9 @@ func (p *PacketDevice) InjectPacket(pkt []byte) error {
 		return io.ErrClosedPipe
 	case p.inQueue <- cp:
 		return nil
+	default:
+		// Queue full: drop packet rather than stalling host network stack
+		return nil
 	}
 }
 
@@ -111,5 +117,20 @@ func (p *PacketDevice) ReceivePacket(ctx context.Context) ([]byte, error) {
 			return nil, io.EOF
 		}
 		return pkt, nil
+	}
+}
+
+// TryReceivePacket non-blockingly retrieves the next packet if available.
+func (p *PacketDevice) TryReceivePacket() ([]byte, error) {
+	select {
+	case <-p.closed:
+		return nil, io.EOF
+	case pkt, ok := <-p.outQueue:
+		if !ok {
+			return nil, io.EOF
+		}
+		return pkt, nil
+	default:
+		return nil, nil
 	}
 }

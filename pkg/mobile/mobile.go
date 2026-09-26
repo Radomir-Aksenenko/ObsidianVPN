@@ -92,6 +92,13 @@ func StartTunnelWithConfig(
 		return "", fmt.Errorf("parse json config: %w", err)
 	}
 
+	if mtu > 0 {
+		cfg.MTU = mtu
+		if cfg.BucketMTU > mtu-60 {
+			cfg.BucketMTU = mtu - 60
+		}
+	}
+
 	dev, err := tun.OpenFD(tunFd, "mobile-tun", mtu)
 	if err != nil {
 		return "", fmt.Errorf("open tun fd: %w", err)
@@ -114,7 +121,14 @@ func StartPacketTunnel(
 		return "", fmt.Errorf("decode URI: %w", err)
 	}
 
-	pktDev := tun.NewPacketDevice("ios-packet-tun", mtu, 2048)
+	if mtu > 0 {
+		cfg.MTU = mtu
+		if cfg.BucketMTU > mtu-60 {
+			cfg.BucketMTU = mtu - 60
+		}
+	}
+
+	pktDev := tun.NewPacketDevice("ios-packet-tun", mtu, 8192)
 	return startTunnelSession(cfg, pktDev, pktDev, protector, statusListener, statsListener)
 }
 
@@ -241,7 +255,7 @@ func ReceivePacket(sessionID string, timeoutMs int) ([]byte, error) {
 	}
 
 	if timeoutMs <= 0 {
-		timeoutMs = 1000
+		return holder.packetDev.TryReceivePacket()
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
 	defer cancel()

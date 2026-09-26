@@ -21,8 +21,13 @@ final class TunnelController: ObservableObject {
     private var manager: NETunnelProviderManager?
     private var observer: NSObjectProtocol?
     private let sharedDefaults = UserDefaults(suiteName: "group.com.obsidian.vpn") ?? .standard
+    private var statsTimer: Timer?
+    private var lastRx: Int = 0
+    private var lastTx: Int = 0
+    private var lastStatsDate = Date()
 
     deinit {
+        statsTimer?.invalidate()
         if let observer { NotificationCenter.default.removeObserver(observer) }
     }
 
@@ -153,6 +158,7 @@ final class TunnelController: ObservableObject {
         case .connected:
             if connectedAt == nil { connectedAt = Date() }
             state = .connected
+            startStatsMonitoring()
             LogStore.shared.log("Статус: Подключено (VPN активен)")
         case .connecting:
             state = .preparing
@@ -162,11 +168,11 @@ final class TunnelController: ObservableObject {
             LogStore.shared.log("Статус: Переподключение...")
         case .disconnecting:
             state = .disconnecting
+            stopStatsMonitoring()
             LogStore.shared.log("Статус: Отключение...")
         case .disconnected:
             connectedAt = nil
-            downloadBytesPerSecond = 0
-            uploadBytesPerSecond = 0
+            stopStatsMonitoring()
             if state == .preparing {
                 let err = sharedDefaults.string(forKey: "lastTunnelError")
                 if let err, !err.isEmpty {
@@ -184,12 +190,51 @@ final class TunnelController: ObservableObject {
             }
         case .invalid:
             connectedAt = nil
-            downloadBytesPerSecond = 0
-            uploadBytesPerSecond = 0
+            stopStatsMonitoring()
             state = .disconnected
             LogStore.shared.log("Статус: Профиль недействителен (invalid)")
         @unknown default:
+            stopStatsMonitoring()
             state = .disconnected
         }
+    }
+
+    private func startStatsMonitoring() {
+        stopStatsMonitoring()
+        lastRx = sharedDefaults.integer(forKey: "vpn.stats.rx")
+        lastTx = sharedDefaults.integer(forKey: "vpn.stats.tx")
+        lastStatsDate = Date()
+
+        statsTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.sampleStats()
+            }
+        }
+    }
+
+    private func stopStatsMonitoring() {
+        statsTimer?.invalidate()
+        statsTimer = nil
+        downloadBytesPerSecond = 0
+        uploadBytesPerSecond = 0
+    }
+
+    private func sampleStats() {
+        guard state == .connected else { return }
+        let now = Date()
+        let dt = max(0.5, now.timeIntervalSince(lastStatsDate))
+        let curRx = sharedDefaults.integer(forKey: "vpn.stats.rx")
+        let curTx = sharedDefaults.integer(forKey: "vpn.stats.tx")
+
+        if curRx >= lastRx {
+            downloadBytesPerSecond = Int64(Double(curRx - lastRx) / dt)
+        }
+        if curTx >= lastTx {
+            uploadBytesPerSecond = Int64(Double(curTx - lastTx) / dt)
+        }
+
+        lastRx = curRx
+        lastTx = curTx
+        lastStatsDate = now
     }
 }

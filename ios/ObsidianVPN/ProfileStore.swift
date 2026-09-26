@@ -29,6 +29,13 @@ final class ProfileStore: ObservableObject {
         LogStore.shared.log("Добавлен сервер: \(profile.name) (\(profile.endpoint))")
     }
 
+    func update(_ profile: VPNProfile) {
+        guard let index = profiles.firstIndex(where: { $0.id == profile.id }) else { return }
+        profiles[index] = profile
+        persist()
+        LogStore.shared.log("Обновлен сервер: \(profile.name)")
+    }
+
     func remove(_ profile: VPNProfile) {
         let name = profile.name
         profiles.removeAll(where: { $0.id == profile.id })
@@ -72,8 +79,20 @@ final class ProfileStore: ObservableObject {
             loadedProfiles = decoded
         }
 
-        if let loadedProfiles {
-            profiles = loadedProfiles
+        if var loaded = loadedProfiles, !loaded.isEmpty {
+            var migrated = false
+            for i in 0..<loaded.count {
+                if loaded[i].name == "Сервер" || loaded[i].city == "Сервер" || loaded[i].city == "Obsidian" {
+                    if let reimported = try? VPNProfile.imported(from: loaded[i].configURI) {
+                        loaded[i].name = reimported.name
+                        loaded[i].city = reimported.city
+                        loaded[i].countryCode = reimported.countryCode
+                        migrated = true
+                    }
+                }
+            }
+            profiles = loaded
+            if migrated { persist() }
             LogStore.shared.log("Загружено сохраненных серверов: \(profiles.count)")
         } else {
             LogStore.shared.log("Список сохраненных серверов пуст")
@@ -88,7 +107,7 @@ final class ProfileStore: ObservableObject {
         }
     }
 
-    private func persist() {
+    func persist() {
         guard let data = try? JSONEncoder().encode(profiles) else { return }
 
         // Write to both UserDefaults stores so sideloaded apps never lose data

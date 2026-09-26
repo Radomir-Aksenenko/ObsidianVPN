@@ -117,7 +117,7 @@ struct HomeView: View {
                     .background(ObsidianTheme.raised, in: Circle())
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(profiles.selectedProfile?.city ?? "Добавить сервер")
+                    Text(profiles.selectedProfile?.name ?? "Добавить сервер")
                         .font(.headline)
                         .foregroundStyle(ObsidianTheme.primaryText)
                     Text(profiles.selectedProfile?.endpoint ?? "Вставить ключ Obsidian")

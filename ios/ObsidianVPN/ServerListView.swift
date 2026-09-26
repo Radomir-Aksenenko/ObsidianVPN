@@ -61,14 +61,14 @@ struct ServerListView: View {
                     .background(ObsidianTheme.accentMuted.opacity(0.72), in: Circle())
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 6) {
-                        Text(profile.city).font(.headline)
+                        Text(profile.name).font(.headline)
                         if profile.isFavorite {
                             Image(systemName: "star.fill")
                                 .font(.caption2)
                                 .foregroundStyle(.orange)
                         }
                     }
-                    Text(profile.endpoint)
+                    Text(profile.city == profile.name ? profile.endpoint : "\(profile.city) · \(profile.endpoint)")
                         .font(.caption)
                         .foregroundStyle(ObsidianTheme.secondaryText)
                 }
