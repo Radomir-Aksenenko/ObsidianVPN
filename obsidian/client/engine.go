@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	utls "github.com/refraction-networking/utls"
@@ -579,19 +580,26 @@ func (s *Session) copyTunToData(tun io.Reader, ch *obsidian.UDPChannel, tunnel *
 					continue
 				}
 				fails := udpFailCount.Add(1)
-				if fails >= 5 {
+				if fails >= 15 {
 					udpActive.Store(false)
 					s.activeProto.Store(tcpProto)
 				}
-				if err := tunnel.SendData(packet); err != nil {
-					return fmt.Errorf("tunnel send: %w", err)
-				}
+				// Best-effort relay over TCP; packet drop under congestion is standard IP behavior
+				_ = tunnel.SendData(packet)
 			} else {
 				udpFailCount.Store(0)
 			}
 		} else {
 			if err := tunnel.SendData(packet); err != nil {
-				return fmt.Errorf("tunnel send: %w", err)
+				if isTemporaryNetworkError(err) {
+					continue
+				}
+				select {
+				case <-tunnel.Done():
+					return io.EOF
+				default:
+					continue
+				}
 			}
 		}
 	}
@@ -605,7 +613,15 @@ func (s *Session) copyUDPToTun(ch *obsidian.UDPChannel, tun io.Writer, lastUDPRe
 		}
 		n, err := ch.Recv(buf)
 		if err != nil {
-			return fmt.Errorf("udp recv: %w", err)
+			if isTemporaryNetworkError(err) {
+				continue
+			}
+			select {
+			case <-s.stopCh:
+				return nil
+			default:
+				return fmt.Errorf("udp recv: %w", err)
+			}
 		}
 		if lastUDPRecvNano != nil {
 			lastUDPRecvNano.Store(time.Now().UnixNano())
@@ -614,6 +630,9 @@ func (s *Session) copyUDPToTun(ch *obsidian.UDPChannel, tun io.Writer, lastUDPRe
 		s.bytesReceived.Add(uint64(n))
 
 		if _, err := tun.Write(buf[:n]); err != nil {
+			if isTemporaryNetworkError(err) {
+				continue
+			}
 			return fmt.Errorf("tun write: %w", err)
 		}
 	}
@@ -682,7 +701,7 @@ func warmupUDPAddress(ch *obsidian.UDPChannel) {
 }
 
 func setOptimalUDPBuffers(conn *net.UDPConn) {
-	sizes := []int{16 * 1024 * 1024, 8 * 1024 * 1024, 4 * 1024 * 1024, 2 * 1024 * 1024, 1024 * 1024}
+	sizes := []int{16 * 1024 * 1024, 8 * 1024 * 1024, 4 * 1024 * 1024, 2 * 1024 * 1024, 1024 * 1024, 512 * 1024, 256 * 1024}
 	for _, sz := range sizes {
 		if err := conn.SetReadBuffer(sz); err == nil {
 			break
@@ -703,8 +722,16 @@ func isTemporaryNetworkError(err error) bool {
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		return true
 	}
-	s := err.Error()
-	return strings.Contains(s, "would block") || strings.Contains(s, "resource temporarily unavailable") || strings.Contains(s, "operation was canceled")
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "would block") ||
+		strings.Contains(s, "resource temporarily unavailable") ||
+		strings.Contains(s, "operation was canceled") ||
+		strings.Contains(s, "no buffer space available") ||
+		strings.Contains(s, "buffer space") ||
+		strings.Contains(s, "message too long") ||
+		strings.Contains(s, "short write") ||
+		strings.Contains(s, "interrupted system call") ||
+		errors.Is(err, syscall.ENOBUFS)
 }
 
 func isIPv6Packet(packet []byte) bool {

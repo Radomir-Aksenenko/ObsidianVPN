@@ -16,8 +16,9 @@ import (
 
 func init() {
 	// Restrict Go runtime memory inside iOS NetworkExtension (15 MB Jetsam ceiling)
-	debug.SetMemoryLimit(10 * 1024 * 1024) // 10 MB soft target
-	debug.SetGCPercent(20)                  // Aggressive GC cycles to quickly release packet buffers
+	// 12 MB soft target prevents Jetsam kills without thrashing CPU during 100+ Mbps bursts
+	debug.SetMemoryLimit(12 * 1024 * 1024)
+	debug.SetGCPercent(60)
 }
 
 // SocketProtector is implemented by mobile host applications (e.g. Android VpnService)
@@ -55,7 +56,7 @@ type activeSessionHolder struct {
 }
 
 var (
-	sessionMu       sync.Mutex
+	sessionMu       sync.RWMutex
 	activeSessions  = make(map[string]*activeSessionHolder)
 	globalProxyMu   sync.Mutex
 	activeSocks5    *client.Socks5Proxy
@@ -135,7 +136,7 @@ func StartPacketTunnel(
 		}
 	}
 
-	pktDev := tun.NewPacketDevice("ios-packet-tun", mtu, 512)
+	pktDev := tun.NewPacketDevice("ios-packet-tun", mtu, 1024)
 	return startTunnelSession(cfg, pktDev, pktDev, protector, statusListener, statsListener)
 }
 
@@ -218,9 +219,9 @@ func StopTunnel(sessionID string) error {
 
 // GetStats returns current metrics for a session.
 func GetStats(sessionID string) (*MobileStats, error) {
-	sessionMu.Lock()
+	sessionMu.RLock()
 	holder, ok := activeSessions[sessionID]
-	sessionMu.Unlock()
+	sessionMu.RUnlock()
 
 	if !ok {
 		return nil, errors.New("session not found")
@@ -241,9 +242,9 @@ func GetStats(sessionID string) (*MobileStats, error) {
 
 // InjectPacket feeds an incoming IP packet from iOS packetFlow into the tunnel.
 func InjectPacket(sessionID string, pkt []byte) error {
-	sessionMu.Lock()
+	sessionMu.RLock()
 	holder, ok := activeSessions[sessionID]
-	sessionMu.Unlock()
+	sessionMu.RUnlock()
 
 	if !ok || holder.packetDev == nil {
 		return errors.New("packet tunnel session not found")
@@ -253,9 +254,9 @@ func InjectPacket(sessionID string, pkt []byte) error {
 
 // ReceivePacket reads the next outgoing IP packet to deliver to iOS packetFlow.
 func ReceivePacket(sessionID string, timeoutMs int) ([]byte, error) {
-	sessionMu.Lock()
+	sessionMu.RLock()
 	holder, ok := activeSessions[sessionID]
-	sessionMu.Unlock()
+	sessionMu.RUnlock()
 
 	if !ok || holder.packetDev == nil {
 		return nil, errors.New("packet tunnel session not found")
@@ -264,6 +265,12 @@ func ReceivePacket(sessionID string, timeoutMs int) ([]byte, error) {
 	if timeoutMs <= 0 {
 		return holder.packetDev.TryReceivePacket()
 	}
+
+	// Fast-path: non-blocking check first avoids timer/context allocation under high load
+	if pkt, err := holder.packetDev.TryReceivePacket(); pkt != nil || err != nil {
+		return pkt, err
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
 	defer cancel()
 
