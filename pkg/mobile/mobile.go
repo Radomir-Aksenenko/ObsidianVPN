@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -12,6 +13,12 @@ import (
 	"obsidian/obsidian/client"
 	"obsidian/obsidian/tun"
 )
+
+func init() {
+	// Restrict Go runtime memory inside iOS NetworkExtension (15 MB Jetsam ceiling)
+	debug.SetMemoryLimit(10 * 1024 * 1024) // 10 MB soft target
+	debug.SetGCPercent(20)                  // Aggressive GC cycles to quickly release packet buffers
+}
 
 // SocketProtector is implemented by mobile host applications (e.g. Android VpnService)
 // to mark sockets as exempt from the VPN routing table before traffic is routed through them.
@@ -128,7 +135,7 @@ func StartPacketTunnel(
 		}
 	}
 
-	pktDev := tun.NewPacketDevice("ios-packet-tun", mtu, 8192)
+	pktDev := tun.NewPacketDevice("ios-packet-tun", mtu, 512)
 	return startTunnelSession(cfg, pktDev, pktDev, protector, statusListener, statsListener)
 }
 

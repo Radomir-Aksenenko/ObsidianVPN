@@ -221,10 +221,35 @@ final class TunnelController: ObservableObject {
 
     private func sampleStats() {
         guard state == .connected else { return }
-        let now = Date()
-        let dt = max(0.5, now.timeIntervalSince(lastStatsDate))
+
+        if let session = manager?.connection as? NETunnelProviderSession {
+            let req = Data("stats".utf8)
+            do {
+                try session.sendProviderMessage(req) { [weak self] responseData in
+                    guard let self, let responseData else { return }
+                    if let dict = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
+                       let rx = dict["rx"] as? Int,
+                       let tx = dict["tx"] as? Int {
+                        Task { @MainActor in
+                            self.applySample(curRx: rx, curTx: tx)
+                        }
+                    }
+                }
+                return
+            } catch {
+                // Fallback to sharedDefaults below
+            }
+        }
+
         let curRx = sharedDefaults.integer(forKey: "vpn.stats.rx")
         let curTx = sharedDefaults.integer(forKey: "vpn.stats.tx")
+        applySample(curRx: curRx, curTx: curTx)
+    }
+
+    private func applySample(curRx: Int, curTx: Int) {
+        guard state == .connected else { return }
+        let now = Date()
+        let dt = max(0.5, now.timeIntervalSince(lastStatsDate))
 
         if curRx >= lastRx {
             downloadBytesPerSecond = Int64(Double(curRx - lastRx) / dt)

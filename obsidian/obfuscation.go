@@ -68,7 +68,7 @@ type TunnelConfig struct {
 	MaxTrailer         int
 }
 
-const tunnelWriteTimeout = 15 * time.Second
+const tunnelWriteTimeout = 30 * time.Second
 
 const (
 	defaultMaxSessionDuration = 6 * time.Hour

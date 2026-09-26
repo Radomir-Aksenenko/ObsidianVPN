@@ -128,11 +128,21 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private let engine = ObsidianPacketEngine()
     private var isRunning = false
     private let receiveQueue = DispatchQueue(label: "com.obsidian.vpn.packet-receive", qos: .userInteractive)
+    private var totalTxBytes: Int64 = 0
+    private var totalRxBytes: Int64 = 0
+    private var lastStatsFlush: Date = Date()
+    private let statsLock = NSLock()
 
     override func startTunnel(
         options: [String: NSObject]?,
         completionHandler: @escaping (Error?) -> Void
     ) {
+        statsLock.lock()
+        totalTxBytes = 0
+        totalRxBytes = 0
+        lastStatsFlush = Date()
+        statsLock.unlock()
+
         let sharedDefaults = UserDefaults(suiteName: "group.com.obsidian.vpn") ?? .standard
         sharedDefaults.removeObject(forKey: "lastTunnelError")
         sharedDefaults.set(0, forKey: "vpn.stats.rx")
@@ -263,22 +273,79 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     ) {
         isRunning = false
         engine.stop()
+        let reasonStr = stopReasonString(reason)
+        tunnelLog("Туннель остановлен iOS. Причина: \(reasonStr)")
+        if reason != .userInitiated && reason != .none {
+            let sharedDefaults = UserDefaults(suiteName: "group.com.obsidian.vpn") ?? .standard
+            sharedDefaults.set("Остановлено системой (\(reasonStr))", forKey: "lastTunnelError")
+        }
         completionHandler()
+    }
+
+    override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)?) {
+        statsLock.lock()
+        let curTx = totalTxBytes
+        let curRx = totalRxBytes
+        statsLock.unlock()
+
+        let statsDict: [String: Any] = [
+            "tx": curTx,
+            "rx": curRx,
+            "running": isRunning
+        ]
+        let data = try? JSONSerialization.data(withJSONObject: statsDict)
+        completionHandler?(data)
+    }
+
+    private func stopReasonString(_ reason: NEProviderStopReason) -> String {
+        switch reason {
+        case .none: return "Обычное завершение"
+        case .userInitiated: return "Пользователь остановил VPN"
+        case .providerFailed: return "Сбой провайдера (providerFailed)"
+        case .noNetworkAvailable: return "Сеть недоступна (noNetworkAvailable)"
+        case .unrecoverableNetworkChange: return "Смена сети (unrecoverableNetworkChange)"
+        case .providerDisabled: return "Конфигурация отключена (providerDisabled)"
+        case .authenticationCanceled: return "Аутентификация отменена"
+        case .configurationFailed: return "Ошибка конфигурации (configurationFailed)"
+        case .idleTimeout: return "Таймаут неактивности (idleTimeout)"
+        case .configurationDisabled: return "Профиль отключен (configurationDisabled)"
+        case .configurationRemoved: return "Профиль удален (configurationRemoved)"
+        case .superceded: return "Вытеснено другим VPN (superceded)"
+        case .userLogout: return "Выход пользователя"
+        case .userSwitch: return "Смена пользователя"
+        case .connectionFailed: return "Сбой сетевого соединения (connectionFailed)"
+        case .sleep: return "Переход устройства в сон (sleep)"
+        case .appUpdate: return "Обновление приложения (appUpdate)"
+        @unknown default: return "Код причины: \(reason.rawValue)"
+        }
     }
 
     private func readFromSystem() {
         guard isRunning else { return }
         packetFlow.readPackets { [weak self] packets, _ in
             guard let self, self.isRunning else { return }
-            var txBytes: Int = 0
+            var batchBytes: Int64 = 0
             for packet in packets {
                 try? self.engine.inject(packet)
-                txBytes += packet.count
+                batchBytes += Int64(packet.count)
             }
-            if txBytes > 0 {
-                let defaults = UserDefaults(suiteName: "group.com.obsidian.vpn") ?? .standard
-                let cur = defaults.integer(forKey: "vpn.stats.tx")
-                defaults.set(cur + txBytes, forKey: "vpn.stats.tx")
+            if batchBytes > 0 {
+                self.statsLock.lock()
+                self.totalTxBytes += batchBytes
+                let now = Date()
+                let shouldFlush = now.timeIntervalSince(self.lastStatsFlush) >= 1.5
+                let curTx = self.totalTxBytes
+                let curRx = self.totalRxBytes
+                if shouldFlush {
+                    self.lastStatsFlush = now
+                }
+                self.statsLock.unlock()
+
+                if shouldFlush {
+                    let defaults = UserDefaults(suiteName: "group.com.obsidian.vpn") ?? .standard
+                    defaults.set(curTx, forKey: "vpn.stats.tx")
+                    defaults.set(curRx, forKey: "vpn.stats.rx")
+                }
             }
             self.readFromSystem()
         }
@@ -292,9 +359,6 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             batchPackets.reserveCapacity(64)
             batchProtocols.reserveCapacity(64)
 
-            var lastStatsFlush = Date()
-            var localRxBytes: Int = 0
-
             while self.isRunning {
                 guard let firstPacket = try? self.engine.receive(timeoutMilliseconds: 200), !firstPacket.isEmpty else {
                     continue
@@ -306,7 +370,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 let firstVer = firstPacket.first.map({ $0 >> 4 }) ?? 4
                 batchPackets.append(firstPacket)
                 batchProtocols.append(NSNumber(value: firstVer == 6 ? AF_INET6 : AF_INET))
-                localRxBytes += firstPacket.count
+                var rxBytes: Int64 = Int64(firstPacket.count)
 
                 // High-performance batch draining: pull up to 63 additional packets without waiting
                 while batchPackets.count < 64 {
@@ -316,18 +380,26 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                     let ver = nextPacket.first.map({ $0 >> 4 }) ?? 4
                     batchPackets.append(nextPacket)
                     batchProtocols.append(NSNumber(value: ver == 6 ? AF_INET6 : AF_INET))
-                    localRxBytes += nextPacket.count
+                    rxBytes += Int64(nextPacket.count)
                 }
 
                 self.packetFlow.writePackets(batchPackets, withProtocols: batchProtocols)
 
+                self.statsLock.lock()
+                self.totalRxBytes += rxBytes
                 let now = Date()
-                if now.timeIntervalSince(lastStatsFlush) >= 1.0 {
+                let shouldFlush = now.timeIntervalSince(self.lastStatsFlush) >= 1.5
+                let curTx = self.totalTxBytes
+                let curRx = self.totalRxBytes
+                if shouldFlush {
+                    self.lastStatsFlush = now
+                }
+                self.statsLock.unlock()
+
+                if shouldFlush {
                     let defaults = UserDefaults(suiteName: "group.com.obsidian.vpn") ?? .standard
-                    let cur = defaults.integer(forKey: "vpn.stats.rx")
-                    defaults.set(cur + localRxBytes, forKey: "vpn.stats.rx")
-                    localRxBytes = 0
-                    lastStatsFlush = now
+                    defaults.set(curTx, forKey: "vpn.stats.tx")
+                    defaults.set(curRx, forKey: "vpn.stats.rx")
                 }
             }
         }

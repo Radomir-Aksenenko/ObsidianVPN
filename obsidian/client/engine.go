@@ -485,14 +485,16 @@ func (s *Session) runConnection(tun io.ReadWriteCloser) error {
 			}()
 		}
 
-		// Failover health monitor
+		// Failover health monitor & carrier NAT keepalive
 		monitorDone := make(chan struct{})
 		go func() {
 			ticker := time.NewTicker(2 * time.Second)
 			defer ticker.Stop()
+			var ticks uint64
 			for {
 				select {
 				case <-ticker.C:
+					ticks++
 					now := time.Now().UnixNano()
 					lastRecv := lastUDPRecvNano.Load()
 					if !udpActive.Load() {
@@ -501,6 +503,9 @@ func (s *Session) runConnection(tun io.ReadWriteCloser) error {
 							udpActive.Store(true)
 							s.activeProto.Store(&udpProto)
 						}
+					} else if ticks%8 == 0 {
+						// Send periodic keepalive to ensure carrier CGNAT pinholes stay open during quiet periods
+						_ = udpCh.Send(nil)
 					}
 				case <-tunnel.Done():
 					return
