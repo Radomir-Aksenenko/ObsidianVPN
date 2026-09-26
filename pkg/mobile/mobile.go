@@ -16,9 +16,9 @@ import (
 
 func init() {
 	// Restrict Go runtime memory inside iOS NetworkExtension (15 MB Jetsam ceiling)
-	// 12 MB soft target prevents Jetsam kills without thrashing CPU during 100+ Mbps bursts
-	debug.SetMemoryLimit(12 * 1024 * 1024)
-	debug.SetGCPercent(60)
+	// 8 MB soft target guarantees Go + Swift + system libraries never exceed 15 MB Jetsam limit
+	debug.SetMemoryLimit(8 * 1024 * 1024)
+	debug.SetGCPercent(40)
 }
 
 // SocketProtector is implemented by mobile host applications (e.g. Android VpnService)
@@ -136,7 +136,7 @@ func StartPacketTunnel(
 		}
 	}
 
-	pktDev := tun.NewPacketDevice("ios-packet-tun", mtu, 1024)
+	pktDev := tun.NewPacketDevice("ios-packet-tun", mtu, 512)
 	return startTunnelSession(cfg, pktDev, pktDev, protector, statusListener, statsListener)
 }
 

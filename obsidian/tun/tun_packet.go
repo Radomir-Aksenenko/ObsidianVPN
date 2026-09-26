@@ -38,6 +38,13 @@ func NewPacketDevice(name string, mtu int, queueSize int) *PacketDevice {
 	}
 }
 
+var inPacketPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 2048)
+		return &b
+	},
+}
+
 func (p *PacketDevice) Read(b []byte) (int, error) {
 	select {
 	case <-p.closed:
@@ -47,6 +54,9 @@ func (p *PacketDevice) Read(b []byte) (int, error) {
 			return 0, io.EOF
 		}
 		n := copy(b, pkt)
+		if cap(pkt) == 2048 {
+			inPacketPool.Put(&pkt)
+		}
 		return n, nil
 	}
 }
@@ -92,15 +102,27 @@ func (p *PacketDevice) InjectPacket(pkt []byte) error {
 		return io.ErrClosedPipe
 	default:
 	}
-	cp := make([]byte, len(pkt))
-	copy(cp, pkt)
+
+	pBuf := inPacketPool.Get().(*[]byte)
+	if cap(*pBuf) < len(pkt) {
+		*pBuf = make([]byte, len(pkt))
+	}
+	*pBuf = (*pBuf)[:len(pkt)]
+	copy(*pBuf, pkt)
+
 	select {
 	case <-p.closed:
+		if cap(*pBuf) == 2048 {
+			inPacketPool.Put(pBuf)
+		}
 		return io.ErrClosedPipe
-	case p.inQueue <- cp:
+	case p.inQueue <- *pBuf:
 		return nil
 	default:
 		// Queue full: drop packet rather than stalling host network stack
+		if cap(*pBuf) == 2048 {
+			inPacketPool.Put(pBuf)
+		}
 		return nil
 	}
 }
