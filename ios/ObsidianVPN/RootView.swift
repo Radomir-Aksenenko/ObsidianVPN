@@ -20,6 +20,7 @@ struct RootView: View {
                 .tag(Destination.settings)
                 .tabItem { Label("Настройки", systemImage: "slider.horizontal.3") }
         }
+        .tint(ObsidianTheme.accent)
         .toolbarBackground(ObsidianTheme.background.opacity(0.96), for: .tabBar)
         .toolbarBackground(.visible, for: .tabBar)
         .task { await tunnel.prepare() }
