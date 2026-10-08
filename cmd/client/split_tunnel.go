@@ -12,6 +12,12 @@ const (
 	splitModeExclude = "exclude"
 )
 
+// routeSpec is a single IPv4 route (destination and netmask) pushed to the OS routing table.
+type routeSpec struct {
+	dest string
+	mask string
+}
+
 func splitTunnelMode(cfg Config) string {
 	mode := strings.ToLower(strings.TrimSpace(cfg.SplitTunnelMode))
 	switch mode {
