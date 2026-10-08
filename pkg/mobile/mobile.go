@@ -95,24 +95,18 @@ func StartTunnelWithConfig(
 	statusListener StatusListener,
 	statsListener StatsListener,
 ) (string, error) {
-	var cfg obsidian.ClientConfig
-	if err := json.Unmarshal([]byte(configJSON), &cfg); err != nil {
-		return "", fmt.Errorf("parse json config: %w", err)
+	cfg, err := parseJSONConfig(configJSON)
+	if err != nil {
+		return "", err
 	}
-
-	if mtu > 0 {
-		cfg.MTU = mtu
-		if cfg.BucketMTU > mtu-60 {
-			cfg.BucketMTU = mtu - 60
-		}
-	}
+	applyMTU(cfg, mtu)
 
 	dev, err := tun.OpenFD(tunFd, "mobile-tun", mtu)
 	if err != nil {
 		return "", fmt.Errorf("open tun fd: %w", err)
 	}
 
-	return startTunnelSession(&cfg, dev, nil, protector, statusListener, statsListener)
+	return startTunnelSession(cfg, dev, nil, protector, statusListener, statsListener)
 }
 
 // StartPacketTunnel creates a tunnel that receives and delivers packets in-memory.
@@ -129,13 +123,55 @@ func StartPacketTunnel(
 		return "", fmt.Errorf("decode URI: %w", err)
 	}
 
+	return startPacketSession(cfg, mtu, protector, statusListener, statsListener)
+}
+
+// StartPacketTunnelWithConfig is the JSON-config variant of StartPacketTunnel for iOS
+// NEPacketTunnelProvider. configJSON is a raw JSON obsidian.ClientConfig instead of an
+// obsidian:// URI. Feed packets in with InjectPacket and read them out with ReceivePacket
+// using the returned session ID.
+func StartPacketTunnelWithConfig(
+	configJSON string,
+	mtu int,
+	protector SocketProtector,
+	statusListener StatusListener,
+	statsListener StatsListener,
+) (string, error) {
+	cfg, err := parseJSONConfig(configJSON)
+	if err != nil {
+		return "", err
+	}
+	return startPacketSession(cfg, mtu, protector, statusListener, statsListener)
+}
+
+// parseJSONConfig decodes a raw JSON obsidian.ClientConfig.
+func parseJSONConfig(configJSON string) (*obsidian.ClientConfig, error) {
+	var cfg obsidian.ClientConfig
+	if err := json.Unmarshal([]byte(configJSON), &cfg); err != nil {
+		return nil, fmt.Errorf("parse json config: %w", err)
+	}
+	return &cfg, nil
+}
+
+// applyMTU overrides cfg.MTU when mtu > 0 and shrinks cfg.BucketMTU to fit inside it.
+func applyMTU(cfg *obsidian.ClientConfig, mtu int) {
 	if mtu > 0 {
 		cfg.MTU = mtu
 		if cfg.BucketMTU > mtu-60 {
 			cfg.BucketMTU = mtu - 60
 		}
 	}
+}
 
+// startPacketSession starts a session over a new in-memory PacketDevice.
+func startPacketSession(
+	cfg *obsidian.ClientConfig,
+	mtu int,
+	protector SocketProtector,
+	statusListener StatusListener,
+	statsListener StatsListener,
+) (string, error) {
+	applyMTU(cfg, mtu)
 	pktDev := tun.NewPacketDevice("ios-packet-tun", mtu, 512)
 	return startTunnelSession(cfg, pktDev, pktDev, protector, statusListener, statsListener)
 }

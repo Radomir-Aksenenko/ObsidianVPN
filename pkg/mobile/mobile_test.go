@@ -87,6 +87,35 @@ func TestMobilePacketTunnel(t *testing.T) {
 	_ = cfgData
 }
 
+// Error paths only: both inputs fail before any socket is opened.
+func TestStartPacketTunnelWithConfigErrors(t *testing.T) {
+	badKeyJSON, _ := json.Marshal(&obsidian.ClientConfig{
+		ServerPublicKey: "not-a-valid-hex-key",
+		ServerHost:      "127.0.0.1",
+		ServerPort:      "59998",
+	})
+
+	tests := []struct {
+		name       string
+		configJSON string
+	}{
+		{name: "invalid json", configJSON: "{not json"},
+		{name: "invalid server_public_key", configJSON: string(badKeyJSON)},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sessID, err := StartPacketTunnelWithConfig(tc.configJSON, 1420, nil, nil, nil)
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if sessID != "" {
+				t.Fatalf("expected empty session ID on error, got %q", sessID)
+			}
+		})
+	}
+}
+
 func TestMobileLocalProxy(t *testing.T) {
 	err := StartLocalProxy("127.0.0.1:0")
 	if err != nil {
