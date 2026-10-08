@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/binary"
 	"fmt"
+	"log"
 	"net"
 	"strings"
 )
@@ -50,6 +51,19 @@ func splitTunnelEntries(routeIPs, sites, apps, processes []string) []string {
 		}
 	}
 	return out
+}
+
+// unixSplitTunnel maps the client config to the split tunnel inputs of the
+// unix TUN implementations. App and process entries are Windows-only.
+func unixSplitTunnel(cfg Config) (mode string, entries []string) {
+	if apps := splitTunnelEntries(nil, nil, cfg.SplitApps, cfg.SplitProcesses); len(apps) > 0 {
+		log.Printf("split tunnel: per-application entries are Windows-only, ignoring %d entries", len(apps))
+	}
+	entries = splitTunnelEntries(cfg.RouteIPs, cfg.SplitSites, nil, nil)
+	if len(entries) == 0 {
+		return "", nil
+	}
+	return splitTunnelMode(cfg), entries
 }
 
 // SplitMatcher manages domain rules, subdomains, wildcards, and CIDR subnets

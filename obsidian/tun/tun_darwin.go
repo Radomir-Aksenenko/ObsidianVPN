@@ -6,10 +6,12 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log"
 	"net/netip"
 	"os"
 	"os/exec"
 	"strconv"
+	"sync"
 	"syscall"
 	"unsafe"
 
@@ -38,12 +40,12 @@ type sockaddrCtl struct {
 }
 
 type darwinDevice struct {
-	file       *os.File
-	name       string
-	mtu        int
-	serverHost string
-	origGW     string
-	routesSet  bool
+	file      *os.File
+	name      string
+	mtu       int
+	net       *netState
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // On Darwin, reading from utun returns a 4-byte header specifying the protocol family (e.g. AF_INET or AF_INET6)
@@ -87,15 +89,13 @@ func (d *darwinDevice) Write(b []byte) (int, error) {
 	return n - 4, nil
 }
 
+// Close restores routes and DNS and closes the interface. It is idempotent.
 func (d *darwinDevice) Close() error {
-	if d.routesSet {
-		_ = exec.Command("route", "delete", "-net", "0.0.0.0/1", "-interface", d.name).Run()
-		_ = exec.Command("route", "delete", "-net", "128.0.0.0/1", "-interface", d.name).Run()
-		if d.serverHost != "" && d.origGW != "" {
-			_ = exec.Command("route", "delete", "-host", d.serverHost, d.origGW).Run()
-		}
-	}
-	return d.file.Close()
+	d.closeOnce.Do(func() {
+		d.net.close()
+		d.closeErr = d.file.Close()
+	})
+	return d.closeErr
 }
 
 func (d *darwinDevice) Name() string {
@@ -175,39 +175,38 @@ func Open(cfg Config) (Device, error) {
 	_ = exec.Command("ifconfig", ifName, ip, destIP, "mtu", strconv.Itoa(mtu), "up").Run()
 
 	dev := &darwinDevice{
-		file:       file,
-		name:       ifName,
-		mtu:        mtu,
-		serverHost: cfg.ServerHost,
+		file: file,
+		name: ifName,
+		mtu:  mtu,
 	}
 
+	// Without ServerHost the old behavior is kept: no routes are touched.
 	if cfg.ServerHost != "" {
-		if gw, err := findDefaultGatewayDarwin(); err == nil && gw != "" {
-			dev.origGW = gw
-			_ = exec.Command("route", "add", "-host", cfg.ServerHost, gw).Run()
-			_ = exec.Command("route", "add", "-net", "0.0.0.0/1", "-interface", ifName).Run()
-			_ = exec.Command("route", "add", "-net", "128.0.0.0/1", "-interface", ifName).Run()
-			dev.routesSet = true
+		gw4 := findDefaultGatewayDarwin(false)
+		var gw6 gateway
+		if cfg.EnableIPv6 {
+			gw6 = findDefaultGatewayDarwin(true)
+		}
+		if !gw4.valid() && cfg.SplitMode != SplitModeInclude {
+			log.Printf("ERROR: default gateway not found; routes and DNS were not configured")
+		} else {
+			ops := &execRoutes{bin: "route", tunName: ifName, gw4: gw4, gw6: gw6, build: darwinRouteArgs}
+			dev.net = setupNetwork(cfg, ops, func() func() { return applyDNSDarwin(dnsOrDefault(cfg.DNS)) })
 		}
 	}
 
 	return dev, nil
 }
 
-func findDefaultGatewayDarwin() (string, error) {
-	out, err := exec.Command("route", "-n", "get", "default").Output()
+func findDefaultGatewayDarwin(ipv6 bool) gateway {
+	args := []string{"-n", "get"}
+	if ipv6 {
+		args = append(args, "-inet6")
+	}
+	args = append(args, "default")
+	out, err := exec.Command("route", args...).Output()
 	if err != nil {
-		return "", err
+		return gateway{}
 	}
-	lines := splitLines(string(out))
-	for _, l := range lines {
-		fields := splitFields(l)
-		for i, f := range fields {
-			if f == "gateway:" && i+1 < len(fields) {
-				return fields[i+1], nil
-			}
-		}
-	}
-	return "", fmt.Errorf("gateway not found")
+	return parseDarwinDefaultRoute(string(out))
 }
-

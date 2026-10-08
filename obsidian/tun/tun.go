@@ -18,7 +18,13 @@ type Config struct {
 	MTU          int
 	DNS          string
 	SecondaryDNS string
-	ServerHost   string // Needed for routing table configuration
+	ServerHost   string // Needed for routing table configuration; may be a domain
+	EnableIPv6   bool   // Also route IPv6 (default routes, server and split entries)
+
+	// SplitMode is "include", "exclude" or "" (full tunnel). SplitEntries holds
+	// IPs, CIDRs and domains. Only the linux and darwin implementations use them.
+	SplitMode    string
+	SplitEntries []string
 }
 
 // DefaultMTU is the default MTU for Obsidian tunnels.

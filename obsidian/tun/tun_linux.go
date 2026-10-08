@@ -4,10 +4,12 @@ package tun
 
 import (
 	"fmt"
+	"log"
 	"net/netip"
 	"os"
 	"os/exec"
 	"strconv"
+	"sync"
 	"syscall"
 	"unsafe"
 
@@ -21,12 +23,12 @@ type ifreq struct {
 }
 
 type linuxDevice struct {
-	file       *os.File
-	name       string
-	mtu        int
-	serverHost string
-	origGW     string
-	routesSet  bool
+	file      *os.File
+	name      string
+	mtu       int
+	net       *netState
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func (d *linuxDevice) Read(b []byte) (int, error) {
@@ -37,17 +39,14 @@ func (d *linuxDevice) Write(b []byte) (int, error) {
 	return d.file.Write(b)
 }
 
+// Close restores routes and DNS and removes the interface. It is idempotent.
 func (d *linuxDevice) Close() error {
-	if d.routesSet {
-		// Clean up routes
-		_ = exec.Command("ip", "route", "del", "0.0.0.0/1", "dev", d.name).Run()
-		_ = exec.Command("ip", "route", "del", "128.0.0.0/1", "dev", d.name).Run()
-		if d.serverHost != "" && d.origGW != "" {
-			_ = exec.Command("ip", "route", "del", d.serverHost, "via", d.origGW).Run()
-		}
-	}
-	_ = exec.Command("ip", "link", "set", "dev", d.name, "down").Run()
-	return d.file.Close()
+	d.closeOnce.Do(func() {
+		d.net.close()
+		_ = exec.Command("ip", "link", "set", "dev", d.name, "down").Run()
+		d.closeErr = d.file.Close()
+	})
+	return d.closeErr
 }
 
 func (d *linuxDevice) Name() string {
@@ -113,38 +112,33 @@ func Open(cfg Config) (Device, error) {
 	}
 
 	dev := &linuxDevice{
-		file:       file,
-		name:       actualName,
-		mtu:        mtu,
-		serverHost: cfg.ServerHost,
+		file: file,
+		name: actualName,
+		mtu:  mtu,
 	}
 
-	// Configure split default routing if serverHost is known
+	// Without ServerHost the old behavior is kept: no routes are touched.
 	if cfg.ServerHost != "" {
-		if gw, err := findDefaultGatewayLinux(); err == nil && gw != "" {
-			dev.origGW = gw
-			_ = exec.Command("ip", "route", "add", cfg.ServerHost, "via", gw).Run()
-			_ = exec.Command("ip", "route", "add", "0.0.0.0/1", "dev", actualName).Run()
-			_ = exec.Command("ip", "route", "add", "128.0.0.0/1", "dev", actualName).Run()
-			dev.routesSet = true
+		gw4 := findDefaultGatewayLinux("-4")
+		var gw6 gateway
+		if cfg.EnableIPv6 {
+			gw6 = findDefaultGatewayLinux("-6")
+		}
+		if !gw4.valid() && cfg.SplitMode != SplitModeInclude {
+			log.Printf("ERROR: default gateway not found; routes and DNS were not configured")
+		} else {
+			ops := &execRoutes{bin: "ip", tunName: actualName, gw4: gw4, gw6: gw6, build: linuxRouteArgs}
+			dev.net = setupNetwork(cfg, ops, func() func() { return applyDNSLinux(actualName, dnsOrDefault(cfg.DNS)) })
 		}
 	}
 
 	return dev, nil
 }
 
-func findDefaultGatewayLinux() (string, error) {
-	out, err := exec.Command("ip", "route", "show", "default").Output()
+func findDefaultGatewayLinux(family string) gateway {
+	out, err := exec.Command("ip", family, "route", "show", "default").Output()
 	if err != nil {
-		return "", err
+		return gateway{}
 	}
-	// Output format: "default via 192.168.1.1 dev eth0 ..."
-	fields := splitFields(string(out))
-	for i, f := range fields {
-		if f == "via" && i+1 < len(fields) {
-			return fields[i+1], nil
-		}
-	}
-	return "", fmt.Errorf("default gateway not found")
+	return parseLinuxDefaultRoute(string(out))
 }
-

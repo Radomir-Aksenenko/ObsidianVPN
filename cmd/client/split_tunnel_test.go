@@ -193,3 +193,22 @@ func TestParseDNSMessage(t *testing.T) {
 		t.Errorf("got ips %v, want [93.184.216.34]", ips)
 	}
 }
+
+func TestUnixSplitTunnel(t *testing.T) {
+	mode, entries := unixSplitTunnel(Config{})
+	if mode != "" || entries != nil {
+		t.Fatalf("empty config = %q %v", mode, entries)
+	}
+	mode, entries = unixSplitTunnel(Config{SplitApps: []string{"chrome.exe"}})
+	if mode != "" || entries != nil {
+		t.Fatalf("apps only must stay full tunnel, got %q %v", mode, entries)
+	}
+	mode, entries = unixSplitTunnel(Config{SplitTunnelMode: "exclude", RouteIPs: []string{"10.0.0.0/8"}, SplitSites: []string{"a.ru"}, SplitApps: []string{"x"}})
+	if mode != splitModeExclude || len(entries) != 2 {
+		t.Fatalf("got %q %v", mode, entries)
+	}
+	mode, _ = unixSplitTunnel(Config{RouteIPs: []string{"1.1.1.1"}})
+	if mode != splitModeInclude {
+		t.Fatalf("legacy route_ips mode = %q", mode)
+	}
+}

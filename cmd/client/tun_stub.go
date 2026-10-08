@@ -16,7 +16,9 @@ func openTUN(cfg Config) io.ReadWriteCloser {
 		MTU:        cfg.MTU,
 		DNS:        cfg.DNS,
 		ServerHost: cfg.ServerHost,
+		EnableIPv6: cfg.EnableIPv6,
 	}
+	tunCfg.SplitMode, tunCfg.SplitEntries = unixSplitTunnel(cfg)
 	dev, err := tun.Open(tunCfg)
 	if err != nil {
 		log.Printf("failed to open TUN device: %v", err)
