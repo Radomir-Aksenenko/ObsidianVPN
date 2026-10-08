@@ -540,14 +540,18 @@ func udpClientToTUN(sess *obsidian.UDPSession, tun io.Writer, sid string, lastRe
 				continue
 			}
 			if shouldDropClientPacket(data) {
-				log.Printf("session %s: dropping non-forwardable client packet: %s", sid, packetSummary(data))
+				if dropLog.Ready() {
+					log.Printf("session %s: dropping non-forwardable client packet: %s", sid, packetSummary(data))
+				}
 				obsidian.PutPacket(data)
 				continue
 			}
 			_, werr := tun.Write(data)
 			obsidian.PutPacket(data) // return to pool
 			if werr != nil {
-				log.Printf("session %s: tun write dropped packet: %s: %v", sid, packetSummary(data), werr)
+				if dropLog.Ready() {
+					log.Printf("session %s: tun write dropped packet: %v", sid, werr)
+				}
 				continue
 			}
 		}
@@ -613,11 +617,15 @@ func tunnelToTUN(tunnel *obsidian.Tunnel, tun io.Writer, sid string, lastRecv ..
 		data := buf[:n]
 
 		if shouldDropClientPacket(data) {
-			log.Printf("session %s: dropping non-forwardable TCP client packet: %s", sid, packetSummary(data))
+			if dropLog.Ready() {
+				log.Printf("session %s: dropping non-forwardable TCP client packet: %s", sid, packetSummary(data))
+			}
 			continue
 		}
 		if _, err := tun.Write(data); err != nil {
-			log.Printf("session %s: tun write dropped packet: %s: %v", sid, packetSummary(data), err)
+			if dropLog.Ready() {
+				log.Printf("session %s: tun write dropped packet: %v", sid, err)
+			}
 			continue
 		}
 	}

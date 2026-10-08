@@ -7,9 +7,24 @@ import (
 	"net/netip"
 	"strings"
 	"sync"
+	"time"
 )
 
-const routedSessionQueueSize = 8192
+// routedSessionQueueSize bounds downlink packets queued per client. It only has to absorb
+// bursts (many parallel flows, e.g. Telegram media) and bound memory; latency is bounded
+// by routedMaxSojourn below. The previous 8192 entries (~10 MB) let a slow client build
+// seconds of queueing delay before any loss, which inflated inner TCP/QUIC RTTs.
+const routedSessionQueueSize = 1024
+
+// routedMaxSojourn is the longest a downlink packet may wait in the per-session queue.
+// Older packets are dropped at dequeue time (CoDel-style): a standing queue is shed
+// quickly and the inner flows get a loss signal instead of seconds of bufferbloat.
+const routedMaxSojourn = 100 * time.Millisecond
+
+type routedPacket struct {
+	buf []byte
+	at  time.Time
+}
 
 var routedPacketPool = sync.Pool{
 	New: func() any {
@@ -33,7 +48,7 @@ type routedSession struct {
 	send   func([]byte) error
 
 	ips  map[netip.Addr]struct{}
-	out  chan []byte
+	out  chan routedPacket
 	done chan struct{}
 	once sync.Once
 }
@@ -63,7 +78,9 @@ func (r *tunRouter) run() {
 		copyPacket := getRoutedPacket(n)
 		copy(copyPacket, packet)
 		if !sess.enqueue(copyPacket) {
-			log.Printf("session %s: outbound queue full, dropping packet len=%d", sess.sid, len(copyPacket))
+			if dropLog.Ready() {
+				log.Printf("session %s: outbound queue full, dropping packet len=%d", sess.sid, len(copyPacket))
+			}
 			putRoutedPacket(copyPacket)
 		}
 	}
@@ -89,7 +106,7 @@ func (r *tunRouter) registerSession(sid string, send func([]byte) error) *routed
 		sid:    sid,
 		send:   send,
 		ips:    make(map[netip.Addr]struct{}),
-		out:    make(chan []byte, routedSessionQueueSize),
+		out:    make(chan routedPacket, routedSessionQueueSize),
 		done:   make(chan struct{}),
 	}
 	r.mu.Lock()
@@ -174,7 +191,7 @@ func (s *routedSession) Write(packet []byte) (int, error) {
 
 func (s *routedSession) enqueue(packet []byte) bool {
 	select {
-	case s.out <- packet:
+	case s.out <- routedPacket{buf: packet, at: time.Now()}:
 		return true
 	case <-s.done:
 		return false
@@ -184,7 +201,7 @@ func (s *routedSession) enqueue(packet []byte) bool {
 }
 
 func (s *routedSession) writeLoop() {
-	var batch [32][]byte
+	var batch [32]routedPacket
 	for {
 		select {
 		case packet := <-s.out:
@@ -200,15 +217,25 @@ func (s *routedSession) writeLoop() {
 				}
 			}
 		sendBatch:
+			now := time.Now()
 			for i := 0; i < n; i++ {
 				p := batch[i]
-				batch[i] = nil
-				if err := s.send(p); err != nil {
-					putRoutedPacket(p)
-					log.Printf("session %s: send to client dropped packet len=%d: %v", s.sid, len(p), err)
+				batch[i] = routedPacket{}
+				if now.Sub(p.at) > routedMaxSojourn {
+					if dropLog.Ready() {
+						log.Printf("session %s: dropping stale downlink packet (queued %v)", s.sid, now.Sub(p.at).Round(time.Millisecond))
+					}
+					putRoutedPacket(p.buf)
 					continue
 				}
-				putRoutedPacket(p)
+				if err := s.send(p.buf); err != nil {
+					putRoutedPacket(p.buf)
+					if dropLog.Ready() {
+						log.Printf("session %s: send to client dropped packet len=%d: %v", s.sid, len(p.buf), err)
+					}
+					continue
+				}
+				putRoutedPacket(p.buf)
 			}
 		case <-s.done:
 			s.drain()
@@ -220,8 +247,8 @@ func (s *routedSession) writeLoop() {
 func (s *routedSession) drain() {
 	for {
 		select {
-		case packet := <-s.out:
-			putRoutedPacket(packet)
+		case p := <-s.out:
+			putRoutedPacket(p.buf)
 		default:
 			return
 		}
