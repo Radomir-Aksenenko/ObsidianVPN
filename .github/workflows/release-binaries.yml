@@ -1,0 +1,57 @@
+name: Release core binaries
+
+# Builds the client (Windows) and server (Linux) binaries for a version tag and
+# publishes them as assets of the GitHub Release with the same name. The desktop
+# app downloads these assets at build time (see scripts/fetch-core.ps1 in
+# ObsidianVPN-Desktop), so the release must exist before the desktop build runs.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build client (windows/amd64)
+        env:
+          CGO_ENABLED: "0"
+          GOOS: windows
+          GOARCH: amd64
+        run: go build -trimpath -ldflags="-s -w" -o dist/obsidian-client.exe ./cmd/client
+
+      - name: Build server (linux/amd64)
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: amd64
+        run: go build -trimpath -ldflags="-s -w" -o dist/obsidian-server-linux ./cmd/server
+
+      - name: Write checksums
+        working-directory: dist
+        run: sha256sum obsidian-client.exe obsidian-server-linux > sha256sums.txt
+
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "$TAG" --generate-notes
+          fi
+          gh release upload "$TAG" \
+            dist/obsidian-client.exe \
+            dist/obsidian-server-linux \
+            dist/sha256sums.txt \
+            --clobber
