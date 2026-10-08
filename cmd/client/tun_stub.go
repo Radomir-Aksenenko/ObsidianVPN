@@ -5,6 +5,8 @@ package main
 import (
 	"io"
 	"log"
+	"net"
+	"net/netip"
 
 	"obsidian/obsidian/tun"
 )
@@ -25,4 +27,24 @@ func openTUN(cfg Config) io.ReadWriteCloser {
 		return nil
 	}
 	return dev
+}
+
+// pinServerIP makes every later dial use the server IP that the TUN bypass
+// route was planned for. ServerHost may resolve to several addresses, and a
+// new lookup at dial time can pick one that has no route. The hostname stays
+// the TLS SNI, which the transport would otherwise take from ServerHost.
+func pinServerIP(cfg *Config, dev io.ReadWriteCloser) {
+	src, ok := dev.(interface{ ServerAddr() (netip.Addr, bool) })
+	if !ok || cfg.ServerHost == "" || net.ParseIP(cfg.ServerHost) != nil {
+		return
+	}
+	addr, ok := src.ServerAddr()
+	if !ok {
+		return
+	}
+	if cfg.SNI == "" {
+		cfg.SNI = cfg.ServerHost
+	}
+	log.Printf("dialing server %s as %s (bypass route address)", cfg.ServerHost, addr)
+	cfg.ServerHost = addr.String()
 }

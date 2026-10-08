@@ -137,6 +137,7 @@ func main() {
 	if tun == nil {
 		log.Fatal("failed to open TUN interface")
 	}
+	pinServerIP(&cfg, tun)
 	defer tun.Close()
 	log.Printf("TUN %s up (%s)", cfg.TunInterface, cfg.TunAddress)
 

@@ -99,6 +99,28 @@ func (m *routeManager) resolveServer() error {
 	return nil
 }
 
+// primaryServer returns the resolved server address: the first IPv4 address,
+// else the first IPv6 address.
+func (m *routeManager) primaryServer() (netip.Addr, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var v6 netip.Addr
+	for _, ip := range m.servers {
+		a, ok := netip.AddrFromSlice(ip)
+		if !ok {
+			continue
+		}
+		a = a.Unmap()
+		if a.Is4() {
+			return a, true
+		}
+		if !v6.IsValid() {
+			v6 = a
+		}
+	}
+	return v6, v6.IsValid()
+}
+
 // start resolves the server, installs the routes and runs the domain refresher.
 func (m *routeManager) start() error {
 	if err := m.resolveServer(); err != nil {

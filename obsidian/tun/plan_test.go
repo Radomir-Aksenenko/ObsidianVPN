@@ -34,7 +34,7 @@ func TestPlanRoutes(t *testing.T) {
 		{
 			name: "off full tunnel ignores entries", mode: SplitModeOff,
 			entries: []string{"10.0.0.0/8"}, dns: "1.1.1.1", servers: server,
-			wantTun: []string{"0.0.0.0/1", "128.0.0.0/1", "1.1.1.1/32"},
+			wantTun: []string{"0.0.0.0/1", "128.0.0.0/1", "::/1", "8000::/1", "1.1.1.1/32"},
 			wantGW:  []string{"203.0.113.5/32"},
 		},
 		{
@@ -46,7 +46,7 @@ func TestPlanRoutes(t *testing.T) {
 			name: "exclude ips cidr and domains via gateway", mode: SplitModeExclude,
 			entries:  []string{"192.168.0.0/16", "8.8.8.8", "example.com", "*.example.com"},
 			resolved: resolved, dns: "1.1.1.1", servers: server,
-			wantTun: []string{"0.0.0.0/1", "128.0.0.0/1", "1.1.1.1/32"},
+			wantTun: []string{"0.0.0.0/1", "128.0.0.0/1", "::/1", "8000::/1", "1.1.1.1/32"},
 			wantGW:  []string{"203.0.113.5/32", "192.168.0.0/16", "8.8.8.8/32", "93.184.216.34/32"},
 		},
 		{
@@ -57,10 +57,28 @@ func TestPlanRoutes(t *testing.T) {
 			wantGW:  []string{"203.0.113.5/32", "93.184.216.34/32", "2606:2800:220:1::1/128", "2001:db8::/32"},
 		},
 		{
+			name: "exclude without ipv6 drops v6 entries but keeps v6 defaults", mode: SplitModeExclude,
+			entries: []string{"2001:db8::/32", "10.0.0.0/8"}, dns: "1.1.1.1", servers: server,
+			wantTun: []string{"0.0.0.0/1", "128.0.0.0/1", "::/1", "8000::/1", "1.1.1.1/32"},
+			wantGW:  []string{"203.0.113.5/32", "10.0.0.0/8"},
+		},
+		{
+			name: "ipv6 server stays via gateway without ipv6", mode: SplitModeOff, dns: "1.1.1.1",
+			servers: []net.IP{net.ParseIP("2001:db8::5")},
+			wantTun: []string{"0.0.0.0/1", "128.0.0.0/1", "::/1", "8000::/1", "1.1.1.1/32"},
+			wantGW:  []string{"2001:db8::5/128"},
+		},
+		{
 			name: "include has no default routes", mode: SplitModeInclude,
 			entries:  []string{"10.1.2.3/24", "example.com"},
 			resolved: resolved, dns: "1.1.1.1", servers: server,
 			wantTun: []string{"10.1.2.0/24", "93.184.216.34/32", "1.1.1.1/32"},
+			wantGW:  []string{"203.0.113.5/32"},
+		},
+		{
+			name: "include with ipv6 routes only listed v6 entries", mode: SplitModeInclude, ipv6: true,
+			entries: []string{"2001:db8::/32"}, dns: "1.1.1.1", servers: server,
+			wantTun: []string{"2001:db8::/32", "1.1.1.1/32"},
 			wantGW:  []string{"203.0.113.5/32"},
 		},
 		{
@@ -78,7 +96,7 @@ func TestPlanRoutes(t *testing.T) {
 			name: "dedupe and mapped addresses", mode: SplitModeExclude,
 			entries: []string{"8.8.8.8", "8.8.8.8/32", " 8.8.8.8 ", "::ffff:8.8.8.8", "8.8.8.9/24"},
 			dns:     "1.1.1.1",
-			wantTun: []string{"0.0.0.0/1", "128.0.0.0/1", "1.1.1.1/32"},
+			wantTun: []string{"0.0.0.0/1", "128.0.0.0/1", "::/1", "8000::/1", "1.1.1.1/32"},
 			wantGW:  []string{"8.8.8.8/32", "8.8.8.0/24"},
 		},
 		{
@@ -88,7 +106,7 @@ func TestPlanRoutes(t *testing.T) {
 		},
 		{
 			name: "unknown mode is full tunnel", mode: "weird", dns: "", servers: server,
-			wantTun: []string{"0.0.0.0/1", "128.0.0.0/1"},
+			wantTun: []string{"0.0.0.0/1", "128.0.0.0/1", "::/1", "8000::/1"},
 			wantGW:  []string{"203.0.113.5/32"},
 		},
 	}

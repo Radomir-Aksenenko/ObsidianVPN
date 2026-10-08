@@ -194,6 +194,9 @@ func psCleanRoutes(ifIdx, primaryDNS, secondaryDNS string) {
 	}
 }
 
+// pinServerIP is a no-op on Windows: the server route is set up in openTUN.
+func pinServerIP(*Config, io.ReadWriteCloser) {}
+
 func openTUN(cfg Config) io.ReadWriteCloser {
 	if cfg.TunAddress == "" {
 		cfg.TunAddress = "10.8.0.2/24"

@@ -174,6 +174,13 @@ func Open(cfg Config) (Device, error) {
 	destIP := "10.8.0.1"
 	_ = exec.Command("ifconfig", ifName, ip, destIP, "mtu", strconv.Itoa(mtu), "up").Run()
 
+	// Not fatal: IPv6 may be disabled on the system.
+	if tunWantsIPv6(cfg) {
+		if _, err := runCmd("ifconfig", ifName, "inet6", tunIPv6Addr, "prefixlen", "64"); err != nil {
+			log.Printf("WARNING: set ipv6 address %s/64 on %s: %v", tunIPv6Addr, ifName, err)
+		}
+	}
+
 	dev := &darwinDevice{
 		file: file,
 		name: ifName,
@@ -196,6 +203,12 @@ func Open(cfg Config) (Device, error) {
 	}
 
 	return dev, nil
+}
+
+// ServerAddr returns the server IP the bypass route was planned for, so that
+// the client can dial the same address (see netState.serverAddr).
+func (d *darwinDevice) ServerAddr() (netip.Addr, bool) {
+	return d.net.serverAddr()
 }
 
 func findDefaultGatewayDarwin(ipv6 bool) gateway {

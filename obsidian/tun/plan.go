@@ -103,12 +103,15 @@ func domainEntries(entries []string) (hosts, unresolvable []string) {
 
 // planRoutes is the OS-neutral route planner.
 //
-//	off/unknown: default routes (0/1, 128/1, plus ::/1, 8000::/1 with ipv6) via TUN.
+//	off/unknown: default routes (0/1, 128/1, ::/1, 8000::/1) via TUN.
 //	exclude:     default routes via TUN; entries and resolved domain IPs via the gateway.
 //	include:     no default routes; entries and resolved domain IPs via TUN.
 //
 // The DNS server is always routed through the TUN and the server IPs always
-// go through the original gateway. IPv6 prefixes are dropped unless ipv6 is true.
+// go through the original gateway. User entries and the DNS server are dropped
+// for IPv6 unless ipv6 is true. The IPv6 default routes are planned in full and
+// exclude mode regardless of ipv6: otherwise IPv6 leaves through the physical
+// interface, while routed into the TUN it is rejected locally by the core.
 func planRoutes(mode string, entries []string, resolved map[string][]net.IP, dns string, serverIPs []net.IP, ipv6 bool) (viaTun, viaGateway []netip.Prefix) {
 	keep := func(p netip.Prefix) bool { return p.IsValid() && (ipv6 || p.Addr().Is4()) }
 
@@ -116,13 +119,13 @@ func planRoutes(mode string, entries []string, resolved map[string][]net.IP, dns
 	gwSet := make(map[netip.Prefix]bool)
 	tunSet := make(map[netip.Prefix]bool)
 	addGW := func(p netip.Prefix) {
-		if keep(p) && !gwSet[p] {
+		if p.IsValid() && !gwSet[p] {
 			gwSet[p] = true
 			viaGateway = append(viaGateway, p)
 		}
 	}
 	addTun := func(p netip.Prefix) {
-		if keep(p) && !tunSet[p] && !servers[p] {
+		if p.IsValid() && !tunSet[p] && !servers[p] {
 			tunSet[p] = true
 			viaTun = append(viaTun, p)
 		}
@@ -130,7 +133,7 @@ func planRoutes(mode string, entries []string, resolved map[string][]net.IP, dns
 
 	var serverPrefixes []netip.Prefix
 	for _, ip := range serverIPs {
-		if p, ok := ipToPrefix(ip); ok && keep(p) {
+		if p, ok := ipToPrefix(ip); ok {
 			servers[p] = true
 			serverPrefixes = append(serverPrefixes, p)
 		}
@@ -148,14 +151,27 @@ func planRoutes(mode string, entries []string, resolved map[string][]net.IP, dns
 				continue
 			}
 			if p, ok := entryPrefix(e); ok {
+				if !keep(p) {
+					continue
+				}
 				split = append(split, p)
 				continue
 			}
 			for _, ip := range resolved[hostKey(e)] {
-				if p, ok := ipToPrefix(ip); ok {
+				if p, ok := ipToPrefix(ip); ok && keep(p) {
 					split = append(split, p)
 				}
 			}
+		}
+	}
+
+	// The default routes always include IPv6, whatever ipv6 says (see above).
+	addDefaults := func() {
+		for _, p := range defaultRoutesV4 {
+			addTun(p)
+		}
+		for _, p := range defaultRoutesV6 {
+			addTun(p)
 		}
 	}
 
@@ -165,27 +181,19 @@ func planRoutes(mode string, entries []string, resolved map[string][]net.IP, dns
 			addTun(p)
 		}
 	case SplitModeExclude:
-		for _, p := range defaultRoutesV4 {
-			addTun(p)
-		}
-		for _, p := range defaultRoutesV6 {
-			addTun(p)
-		}
+		addDefaults()
 		for _, p := range split {
 			addGW(p)
 		}
 	default:
-		for _, p := range defaultRoutesV4 {
-			addTun(p)
-		}
-		for _, p := range defaultRoutesV6 {
-			addTun(p)
-		}
+		addDefaults()
 	}
 
 	if a, err := netip.ParseAddr(strings.TrimSpace(dns)); err == nil {
 		a = a.Unmap()
-		addTun(netip.PrefixFrom(a, a.BitLen()))
+		if p := netip.PrefixFrom(a, a.BitLen()); keep(p) {
+			addTun(p)
+		}
 	}
 	return viaTun, viaGateway
 }

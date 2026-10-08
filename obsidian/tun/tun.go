@@ -19,7 +19,7 @@ type Config struct {
 	DNS          string
 	SecondaryDNS string
 	ServerHost   string // Needed for routing table configuration; may be a domain
-	EnableIPv6   bool   // Also route IPv6 (default routes, server and split entries)
+	EnableIPv6   bool   // Route IPv6 split entries and DNS; default routes cover IPv6 regardless
 
 	// SplitMode is "include", "exclude" or "" (full tunnel). SplitEntries holds
 	// IPs, CIDRs and domains. Only the linux and darwin implementations use them.

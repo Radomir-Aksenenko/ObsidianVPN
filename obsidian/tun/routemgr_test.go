@@ -49,15 +49,16 @@ func TestRouteManagerResolvesServerDomainAndCleansUp(t *testing.T) {
 	if got := ops.adds[0]; got.viaTun || got.prefix.String() != "198.51.100.7/32" {
 		t.Fatalf("first route = %+v, want server /32 via gateway", got)
 	}
-	if len(ops.adds) != 4 {
-		t.Fatalf("adds = %d, want 4", len(ops.adds))
+	// server via gateway, v4 defaults, v6 defaults (always in full mode), dns.
+	if len(ops.adds) != 6 {
+		t.Fatalf("adds = %d, want 6", len(ops.adds))
 	}
 	m.close()
 	m.close() // idempotent
-	if len(ops.dels) != 4 {
-		t.Fatalf("dels = %d, want 4", len(ops.dels))
+	if len(ops.dels) != 6 {
+		t.Fatalf("dels = %d, want 6", len(ops.dels))
 	}
-	if ops.dels[3] != ops.adds[0] {
+	if ops.dels[5] != ops.adds[0] {
 		t.Fatalf("routes must be removed in reverse order")
 	}
 }

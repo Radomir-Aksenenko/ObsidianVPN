@@ -105,6 +105,13 @@ func Open(cfg Config) (Device, error) {
 		return nil, fmt.Errorf("set ip address %s on %s: %w", addr, actualName, err)
 	}
 
+	// Not fatal: the kernel may have IPv6 disabled.
+	if tunWantsIPv6(cfg) {
+		if _, err := runCmd("ip", "-6", "addr", "add", tunIPv6Addr+"/64", "dev", actualName); err != nil {
+			log.Printf("WARNING: set ipv6 address %s/64 on %s: %v", tunIPv6Addr, actualName, err)
+		}
+	}
+
 	// Bring interface up
 	if err := exec.Command("ip", "link", "set", "dev", actualName, "up").Run(); err != nil {
 		file.Close()
@@ -133,6 +140,12 @@ func Open(cfg Config) (Device, error) {
 	}
 
 	return dev, nil
+}
+
+// ServerAddr returns the server IP the bypass route was planned for, so that
+// the client can dial the same address (see netState.serverAddr).
+func (d *linuxDevice) ServerAddr() (netip.Addr, bool) {
+	return d.net.serverAddr()
 }
 
 func findDefaultGatewayLinux(family string) gateway {

@@ -31,6 +31,16 @@ func dnsOrDefault(dns string) string {
 	return dns
 }
 
+// tunIPv6Addr is the IPv6 address of the TUN (fd00:8::2/64). Once it is set,
+// IPv6 routed into the TUN reaches the core, which rejects it when IPv6 is off.
+const tunIPv6Addr = "fd00:8::2"
+
+// tunWantsIPv6 reports whether the TUN needs its IPv6 address: always in full
+// and exclude mode, in include mode only when IPv6 entries can be routed.
+func tunWantsIPv6(cfg Config) bool {
+	return cfg.SplitMode != SplitModeInclude || cfg.EnableIPv6
+}
+
 type routeArgsFunc func(r route, verb, tunName string, gw gateway) ([]string, error)
 
 // execRoutes is the OS layer of routeManager: it only runs `ip` or `route`.
@@ -95,6 +105,15 @@ func setupNetwork(cfg Config, ops routeOps, applyDNS func() func()) *netState {
 	}
 	log.Printf("network configured: split mode=%q, entries=%d, dns=%q", mode, len(cfg.SplitEntries), dns)
 	return st
+}
+
+// serverAddr returns the server IP the bypass route was planned for. ok is
+// false when no routes were installed.
+func (s *netState) serverAddr() (netip.Addr, bool) {
+	if s == nil || s.rm == nil {
+		return netip.Addr{}, false
+	}
+	return s.rm.primaryServer()
 }
 
 func (s *netState) close() {
