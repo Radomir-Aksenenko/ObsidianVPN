@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"runtime/debug"
 	"sync"
 	"time"
@@ -65,6 +66,10 @@ var (
 
 // StartTunnelWithFd initializes and starts an Obsidian VPN tunnel using an OS-provided TUN file descriptor.
 // This is the primary entry point for Android VpnService.
+//
+// Ownership: tunFd is owned by this package from the call onward. On every error return it is
+// closed exactly once, so the caller must not close it afterwards. Otherwise the VPN interface
+// stays up with no reader and blackholes the device.
 func StartTunnelWithFd(
 	configURI string,
 	tunFd int,
@@ -75,18 +80,22 @@ func StartTunnelWithFd(
 ) (string, error) {
 	cfg, err := obsidian.DecodeKey(configURI)
 	if err != nil {
+		closeTunFd(tunFd)
 		return "", fmt.Errorf("decode URI: %w", err)
 	}
 
 	dev, err := tun.OpenFD(tunFd, "mobile-tun", mtu)
 	if err != nil {
+		closeTunFd(tunFd)
 		return "", fmt.Errorf("open tun fd: %w", err)
 	}
 
+	// dev owns tunFd from here; startTunnelSession closes dev on failure.
 	return startTunnelSession(cfg, dev, nil, protector, statusListener, statsListener)
 }
 
 // StartTunnelWithConfig initializes a tunnel with a raw JSON configuration string.
+// Ownership of tunFd follows the same rules as StartTunnelWithFd: it is closed on every error return.
 func StartTunnelWithConfig(
 	configJSON string,
 	tunFd int,
@@ -97,16 +106,29 @@ func StartTunnelWithConfig(
 ) (string, error) {
 	cfg, err := parseJSONConfig(configJSON)
 	if err != nil {
+		closeTunFd(tunFd)
 		return "", err
 	}
 	applyMTU(cfg, mtu)
 
 	dev, err := tun.OpenFD(tunFd, "mobile-tun", mtu)
 	if err != nil {
+		closeTunFd(tunFd)
 		return "", fmt.Errorf("open tun fd: %w", err)
 	}
 
+	// dev owns tunFd from here; startTunnelSession closes dev on failure.
 	return startTunnelSession(cfg, dev, nil, protector, statusListener, statsListener)
+}
+
+// closeTunFd closes a TUN fd that was handed to Go but has no tun.Device wrapped around it yet.
+// Once tun.OpenFD succeeds, the device owns the fd and must be the only thing that closes it.
+// A negative fd was never valid and is not ours to close.
+func closeTunFd(fd int) {
+	if fd < 0 {
+		return
+	}
+	_ = os.NewFile(uintptr(fd), "mobile-tun").Close()
 }
 
 // StartPacketTunnel creates a tunnel that receives and delivers packets in-memory.
@@ -289,6 +311,12 @@ func InjectPacket(sessionID string, pkt []byte) error {
 }
 
 // ReceivePacket reads the next outgoing IP packet to deliver to iOS packetFlow.
+//
+// Return contract:
+//   - (packet, nil): a packet was ready.
+//   - (nil, nil): no packet arrived within timeoutMs (or immediately when timeoutMs <= 0).
+//     This is not an error; callers should simply poll again.
+//   - (nil, err): a real failure, such as an unknown session or a closed tunnel (io.EOF).
 func ReceivePacket(sessionID string, timeoutMs int) ([]byte, error) {
 	sessionMu.RLock()
 	holder, ok := activeSessions[sessionID]
@@ -310,7 +338,11 @@ func ReceivePacket(sessionID string, timeoutMs int) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
 	defer cancel()
 
-	return holder.packetDev.ReceivePacket(ctx)
+	pkt, err := holder.packetDev.ReceivePacket(ctx)
+	if errors.Is(err, context.DeadlineExceeded) {
+		return nil, nil
+	}
+	return pkt, err
 }
 
 // ParseConfigURI parses an Obsidian URI and returns the configuration formatted as JSON.

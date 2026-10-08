@@ -116,6 +116,48 @@ func TestStartPacketTunnelWithConfigErrors(t *testing.T) {
 	}
 }
 
+// A timed-out ReceivePacket is "no packet", not an error: it must return (nil, nil).
+func TestReceivePacketTimeoutReturnsNil(t *testing.T) {
+	kp, _ := obsidian.GenerateKeypair()
+	cfg := &obsidian.ClientConfig{
+		ServerPublicKey: hex.EncodeToString(kp.Public[:]),
+		ServerHost:      "127.0.0.1",
+		ServerPort:      "59998",
+	}
+	uri := obsidian.EncodeURI(cfg, "test")
+
+	sessID, err := StartPacketTunnel(uri, 1420, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("StartPacketTunnel failed: %v", err)
+	}
+	defer StopTunnel(sessID)
+
+	// Nothing is injected from the server side, so this must time out.
+	pkt, err := ReceivePacket(sessID, 20)
+	if err != nil {
+		t.Fatalf("ReceivePacket on timeout returned error: %v", err)
+	}
+	if pkt != nil {
+		t.Fatalf("expected nil packet on timeout, got %d bytes", len(pkt))
+	}
+
+	// Non-blocking poll takes the same "no packet" path.
+	if pkt, err := ReceivePacket(sessID, 0); pkt != nil || err != nil {
+		t.Fatalf("ReceivePacket(0) = (%v, %v), want (nil, nil)", pkt, err)
+	}
+}
+
+// Real failures must still surface as errors, not be swallowed as "no packet".
+func TestReceivePacketUnknownSessionIsError(t *testing.T) {
+	pkt, err := ReceivePacket("sess-does-not-exist", 10)
+	if err == nil {
+		t.Fatal("expected error for unknown session")
+	}
+	if pkt != nil {
+		t.Fatalf("expected nil packet, got %d bytes", len(pkt))
+	}
+}
+
 func TestMobileLocalProxy(t *testing.T) {
 	err := StartLocalProxy("127.0.0.1:0")
 	if err != nil {
