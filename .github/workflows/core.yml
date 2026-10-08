@@ -1,0 +1,91 @@
+name: Core
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Vet and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # cmd/client only builds for Windows (split_tunnel.go uses routeSpec from tun_windows.go),
+      # so it is vetted with GOOS=windows and excluded from the Linux steps.
+      - name: Vet (linux packages)
+        run: go vet ./obsidian/... ./pkg/... ./cmd/server/... ./cmd/probe/...
+
+      - name: Vet (windows client)
+        run: GOOS=windows go vet ./cmd/client/...
+
+      - name: Test
+        run: go test ./obsidian/... ./pkg/... ./cmd/server/...
+
+  build:
+    name: Build release binaries
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p dist
+          GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o dist/obsidian-server-linux-amd64 ./cmd/server
+          GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o dist/obsidian-server-linux-arm64 ./cmd/server
+          GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o dist/obsidian-client-windows-amd64.exe ./cmd/client
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: obsidian-binaries
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: obsidian-binaries
+          path: dist
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes
