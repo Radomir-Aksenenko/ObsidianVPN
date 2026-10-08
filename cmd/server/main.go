@@ -459,10 +459,10 @@ func handleClient(conn net.Conn, priv, pub [obsidian.KeySize]byte,
 		defer route.Close()
 		udpDone := make(chan struct{})
 		go func() {
-			udpClientToTUN(sess, route, sessionID, &lastUDPRecv)
+			udpClientToTUN(sess, newClientSink(route, cfg.EnableIPv6), sessionID, &lastUDPRecv)
 			close(udpDone)
 		}()
-		go tunnelToTUN(tunnel, route, sessionID, &lastTCPRecv)
+		go tunnelToTUN(tunnel, newClientSink(route, cfg.EnableIPv6), sessionID, &lastTCPRecv)
 		select {
 		case <-tunnel.Done():
 			log.Printf("session %s: control channel closed", sessionID)
@@ -472,7 +472,7 @@ func handleClient(conn net.Conn, priv, pub [obsidian.KeySize]byte,
 		log.Printf("session %s: TCP relay started", sessionID)
 		route := tunRoutes.registerSession(sessionID, tunnel.SendData)
 		defer route.Close()
-		tunnelToTUN(tunnel, route, sessionID)
+		tunnelToTUN(tunnel, newClientSink(route, cfg.EnableIPv6), sessionID)
 	}
 }
 
