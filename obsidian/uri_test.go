@@ -1,6 +1,7 @@
 package obsidian
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -78,5 +79,35 @@ func TestURI_VPNSchemeAlias(t *testing.T) {
 	}
 	if cfg2.Label != "DirectVPN" {
 		t.Errorf("expected label DirectVPN, got %s", cfg2.Label)
+	}
+}
+
+func TestURI_EncodeIPv6HostNotDoubleBracketed(t *testing.T) {
+	pubKey := "170a2fec63c53e4a0c6c866d9d08a3304602b3a9090101765af292a469ac1f27"
+
+	for _, host := range []string{"2001:db8::1", "[2001:db8::1]"} {
+		cfg := DefaultClientConfig()
+		cfg.ServerHost = host
+		cfg.ServerPort = "443"
+		cfg.ServerPublicKey = pubKey
+
+		encoded := EncodeURI(&cfg, "IPv6")
+		if !strings.Contains(encoded, "@[2001:db8::1]:") {
+			t.Fatalf("host %q: expected encoded URI to contain @[2001:db8::1]:, got %s", host, encoded)
+		}
+		if strings.Contains(encoded, "[[") {
+			t.Fatalf("host %q: encoded URI is double-bracketed: %s", host, encoded)
+		}
+
+		parsed, err := ParseURI(encoded)
+		if err != nil {
+			t.Fatalf("host %q: ParseURI of encoded URI failed: %v", host, err)
+		}
+		if parsed.ServerHost != "2001:db8::1" {
+			t.Errorf("host %q: expected parsed ServerHost 2001:db8::1, got %q", host, parsed.ServerHost)
+		}
+		if parsed.ServerPort != "443" {
+			t.Errorf("host %q: expected port 443, got %s", host, parsed.ServerPort)
+		}
 	}
 }

@@ -336,10 +336,8 @@ func EncodeURI(cfg *ClientConfig, label string) string {
 		return ""
 	}
 
-	host := cfg.ServerHost
-	if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
-		host = "[" + host + "]"
-	}
+	// Strip any brackets so net.JoinHostPort adds exactly one pair for IPv6.
+	host := strings.TrimSuffix(strings.TrimPrefix(cfg.ServerHost, "["), "]")
 
 	port := cfg.ServerPort
 	if port == "" {
