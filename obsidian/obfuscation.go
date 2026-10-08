@@ -33,19 +33,26 @@ const (
 	JitterHeavy                // 0–50ms
 )
 
-func (j JitterProfile) sleep() {
-	var maxMs float64
+// window returns the maximum delay of the profile, or 0 when jitter is off.
+func (j JitterProfile) window() time.Duration {
 	switch j {
 	case JitterLight:
-		maxMs = 5
+		return 5 * time.Millisecond
 	case JitterMedium:
-		maxMs = 20
+		return 20 * time.Millisecond
 	case JitterHeavy:
-		maxMs = 50
+		return 50 * time.Millisecond
 	default:
+		return 0
+	}
+}
+
+func (j JitterProfile) sleep() {
+	maxDelay := j.window()
+	if maxDelay <= 0 {
 		return
 	}
-	delay := time.Duration(rand.Float64() * maxMs * float64(time.Millisecond))
+	delay := time.Duration(rand.Float64() * float64(maxDelay))
 	if delay > 0 {
 		time.Sleep(delay)
 	}
@@ -243,17 +250,22 @@ type Tunnel struct {
 	dataIn       chan tunnelPkt
 	sendMu       sync.Mutex
 	lastAuthNano atomic.Int64
-	createdAt    time.Time
-	maxDuration  time.Duration
-	maxPackets   uint64
-	packetCount  atomic.Uint64
+	// lastDataSendNano is the time of the previous DATA send; used to detect bursts for jitter.
+	lastDataSendNano atomic.Int64
+	createdAt        time.Time
+	maxDuration      time.Duration
+	maxPackets       uint64
+	packetCount      atomic.Uint64
 
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
 
-const tunnelDataQueueSize = 1024
+// tunnelDataQueueSize bounds decrypted DATA packets buffered between recvLoop and the
+// consumer. When full, recvLoop blocks (backpressure to the outer stream), so this only
+// limits local queueing delay: 256 x 1.3 KB is ~100 ms at 20 Mbps versus ~0.5 s at 1024.
+const tunnelDataQueueSize = 256
 
 func NewTunnel(conn net.Conn, framer *StreamFramer, cfg TunnelConfig) *Tunnel {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -300,8 +312,26 @@ func NewTunnel(conn net.Conn, framer *StreamFramer, cfg TunnelConfig) *Tunnel {
 
 // SendData отправляет IP пакет через туннель.
 func (t *Tunnel) SendData(payload []byte) error {
-	t.jitter.sleep() // вне мьютекса — не блокирует noise/keepalive
+	t.applyBurstJitter()
 	return t.writePacket(PacketData, payload)
+}
+
+// applyBurstJitter delays the first DATA packet of a burst instead of every packet.
+// A per-packet sleep (up to 50 ms under JitterHeavy) caps throughput at roughly
+// 1/avg(delay) packets per second and stalls the TUN reader. A burst is a run of
+// sends with gaps shorter than the jitter window, so bulk transfers are not
+// throttled while sparse or interactive packets still get timing jitter.
+func (t *Tunnel) applyBurstJitter() {
+	window := t.jitter.window()
+	if window <= 0 {
+		return
+	}
+	now := time.Now().UnixNano()
+	prev := t.lastDataSendNano.Swap(now)
+	if now-prev < int64(window) {
+		return
+	}
+	t.jitter.sleep()
 }
 
 // RecvDataInto читает следующий DATA пакет напрямую в dst без промежуточных аллокаций.
