@@ -192,8 +192,10 @@ obsidian://170a2fec63c53e4a0c6c866d9d08a3304602b3a9090101765af292a469ac1f27@198.
 
 ## Building from Source
 
+The client apps (iOS and Windows desktop) are not part of this repository. They live in the private ObsidianVPN-App repository, which consumes this repo as the `core/` git submodule. This repository contains only the VPN core: `obsidian/`, `pkg/`, `cmd/`, `bindings/`, `tools/`, `examples/` and `docs/`.
+
 ### Prerequisites
-- Go 1.22 or higher
+- Go 1.26.1 or higher (see [go.mod](go.mod))
 - Linux (for server TUN router: `iproute2`, `iptables` or `nftables`)
 - Windows / macOS / Linux (for client CLI)
 
@@ -212,9 +214,6 @@ go build -o bin/obsidian-client ./cmd/client
 ```bash
 # Android AAR (requires gomobile)
 gomobile bind -target=android -androidapi=21 -o obsidian.aar ./pkg/mobile
-
-# iOS XCFramework (requires gomobile & macOS)
-gomobile bind -target=ios,iossimulator -o Obsidian.xcframework ./pkg/mobile
 ```
 
 ### Build C-Shared Libraries

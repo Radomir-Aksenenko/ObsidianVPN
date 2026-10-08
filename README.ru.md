@@ -192,8 +192,10 @@ obsidian://170a2fec63c53e4a0c6c866d9d08a3304602b3a9090101765af292a469ac1f27@198.
 
 ## Сборка из исходников
 
+Клиентские приложения (iOS и Windows) в этом репозитории не хранятся. Они находятся в приватном репозитории ObsidianVPN-App, который подключает этот репозиторий как git-подмодуль `core/`. Здесь остается только ядро VPN: `obsidian/`, `pkg/`, `cmd/`, `bindings/`, `tools/`, `examples/` и `docs/`.
+
 ### Требования
-- Go 1.22 или выше
+- Go 1.26.1 или выше (версия указана в [go.mod](go.mod))
 - Linux (для сервера TUN: утилиты `iproute2`, `iptables` или `nftables`)
 - Windows / macOS / Linux (для клиента)
 
@@ -212,9 +214,6 @@ go build -o bin/obsidian-client ./cmd/client
 ```bash
 # Android AAR (требуется gomobile)
 gomobile bind -target=android -androidapi=21 -o obsidian.aar ./pkg/mobile
-
-# iOS XCFramework (требуется gomobile и macOS)
-gomobile bind -target=ios,iossimulator -o Obsidian.xcframework ./pkg/mobile
 ```
 
 ### Сборка C-Shared библиотек
