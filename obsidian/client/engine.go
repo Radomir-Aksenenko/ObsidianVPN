@@ -112,6 +112,9 @@ type Session struct {
 	stopCh chan struct{}
 	doneCh chan struct{}
 	stopOnce sync.Once
+
+	// rejectLimiter bounds locally generated IPv6 rejects (see rejectIPv6).
+	rejectLimiter *obsidian.RejectLimiter
 }
 
 // NewSession creates an embeddable client Session from ClientConfig.
@@ -162,6 +165,7 @@ func NewSession(cfg *obsidian.ClientConfig, opts ...Option) (*Session, error) {
 		obfCfg:        obfCfg,
 		tunnelCfg:     tunnelCfg,
 		autoReconnect: true,
+		rejectLimiter: obsidian.NewRejectLimiter(100, 20),
 		status:        StatusDisconnected,
 		stopCh:        make(chan struct{}),
 		doneCh:        make(chan struct{}),
@@ -553,9 +557,10 @@ func (s *Session) runConnection(tun io.ReadWriteCloser) error {
 	}
 }
 
-func (s *Session) copyTunToData(tun io.Reader, ch *obsidian.UDPChannel, tunnel *obsidian.Tunnel, udpActive *atomic.Bool, tcpProto *string) error {
+func (s *Session) copyTunToData(tun io.ReadWriter, ch *obsidian.UDPChannel, tunnel *obsidian.Tunnel, udpActive *atomic.Bool, tcpProto *string) error {
 	buf := make([]byte, 2048)
 	sendBuf := make([]byte, 2048)
+	rejectBuf := make([]byte, obsidian.IPv6RejectBufSize)
 	var udpFailCount atomic.Int32
 
 	for {
@@ -571,6 +576,7 @@ func (s *Session) copyTunToData(tun io.Reader, ch *obsidian.UDPChannel, tunnel *
 		s.bytesSent.Add(uint64(n))
 
 		if !s.cfg.EnableIPv6 && isIPv6Packet(packet) {
+				s.rejectIPv6(tun, packet, rejectBuf)
 			continue
 		}
 
@@ -638,8 +644,9 @@ func (s *Session) copyUDPToTun(ch *obsidian.UDPChannel, tun io.Writer, lastUDPRe
 	}
 }
 
-func (s *Session) copyTunToTunnel(tun io.Reader, tunnel *obsidian.Tunnel) error {
+func (s *Session) copyTunToTunnel(tun io.ReadWriter, tunnel *obsidian.Tunnel) error {
 	buf := make([]byte, 2048)
+	rejectBuf := make([]byte, obsidian.IPv6RejectBufSize)
 	for {
 		if s.isStopped() {
 			return nil
@@ -650,6 +657,11 @@ func (s *Session) copyTunToTunnel(tun io.Reader, tunnel *obsidian.Tunnel) error 
 		}
 		s.pktsSent.Add(1)
 		s.bytesSent.Add(uint64(n))
+
+		if !s.cfg.EnableIPv6 && isIPv6Packet(buf[:n]) {
+			s.rejectIPv6(tun, buf[:n], rejectBuf)
+			continue
+		}
 
 		if err := tunnel.SendData(buf[:n]); err != nil {
 			return fmt.Errorf("tunnel send: %w", err)
@@ -732,6 +744,20 @@ func isTemporaryNetworkError(err error) bool {
 		strings.Contains(s, "short write") ||
 		strings.Contains(s, "interrupted system call") ||
 		errors.Is(err, syscall.ENOBUFS)
+}
+
+// rejectIPv6 answers an IPv6 packet from the TUN that the tunnel cannot carry (IPv6
+// disabled) with a local TCP RST or ICMPv6 Destination Unreachable, written back to the
+// TUN so the host fails fast instead of waiting for a timeout. Rate limited.
+func (s *Session) rejectIPv6(tun io.Writer, packet []byte, buf []byte) {
+	n, ok := obsidian.BuildIPv6Reject(packet, buf)
+	if !ok {
+		return
+	}
+	if s.rejectLimiter != nil && !s.rejectLimiter.Allow() {
+		return
+	}
+	_, _ = tun.Write(buf[:n])
 }
 
 func isIPv6Packet(packet []byte) bool {
