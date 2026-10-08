@@ -18,16 +18,9 @@ test-server-linux
 test_*
 ObsidianAdmin*
 ObsidianVPN*
-!ios/ObsidianVPN/
-!ios/ObsidianVPN/**
-!ios/Config/ObsidianVPN.entitlements
-ios/Generated/
-ios/Frameworks/
-ios/*.xcodeproj/
-ios/DerivedData/
 wintun.dll
 
-# Private GUI repository (moved to ObsidianVPN-Desktop)
+# Client app leftovers (client apps live in the private ObsidianVPN-App repo)
 desktop/
 build-gui.bat
 docs/ui-prompts.md
@@ -37,7 +30,6 @@ screenshots/
 *.png
 *.jpg
 *.jpeg
-!ios/ObsidianVPN/Assets.xcassets/**
 
 # Local configurations and sensitive files
 obsidian-client.json
