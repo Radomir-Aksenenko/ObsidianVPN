@@ -1,12 +1,14 @@
 package main
 
 import (
+	"encoding/binary"
 	"fmt"
 	"io"
 	"log"
 	"net/netip"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -20,6 +22,14 @@ const routedSessionQueueSize = 1024
 // Older packets are dropped at dequeue time (CoDel-style): a standing queue is shed
 // quickly and the inner flows get a loss signal instead of seconds of bufferbloat.
 const routedMaxSojourn = 100 * time.Millisecond
+
+// routedPrioQueueSize bounds latency-sensitive packets queued per client (see isLatencySensitive).
+// When it is full such packets fall back to the bulk queue instead of being dropped.
+const routedPrioQueueSize = 256
+
+// routedPrioBurst is how many latency-sensitive packets may go out in a row before a waiting
+// bulk packet gets a turn. Without it, a constant game or voice stream would starve bulk.
+const routedPrioBurst = 64
 
 type routedPacket struct {
 	buf []byte
@@ -40,6 +50,11 @@ type tunRouter struct {
 	byIP     map[netip.Addr]*routedSession
 
 	writeMu sync.Mutex
+
+	// tunnelMTU is the packet size that fits the encrypted transport.
+	tunnelMTU int
+	// normalizeMSS enables MSS rewriting and downlink splitting (see mss.go).
+	normalizeMSS bool
 }
 
 type routedSession struct {
@@ -47,18 +62,32 @@ type routedSession struct {
 	sid    string
 	send   func([]byte) error
 
+	// mtu is the largest downlink packet this client accepts.
+	mtu  atomic.Int32
 	ips  map[netip.Addr]struct{}
 	out  chan routedPacket
-	done chan struct{}
-	once sync.Once
+	prio chan routedPacket
+	// prioRun counts latency-sensitive sends since the last bulk send. writeLoop only.
+	prioRun int
+	done    chan struct{}
+	once    sync.Once
 }
 
 func newTunRouter(tun io.ReadWriter) *tunRouter {
 	return &tunRouter{
-		tun:      tun,
-		sessions: make(map[*routedSession]struct{}),
-		byIP:     make(map[netip.Addr]*routedSession),
+		tun:          tun,
+		sessions:     make(map[*routedSession]struct{}),
+		byIP:         make(map[netip.Addr]*routedSession),
+		tunnelMTU:    maxTunnelMTU,
+		normalizeMSS: true,
 	}
+}
+
+// configureMSS sets the transport MTU and the MSS normalization mode. Call it before run
+// and before sessions are registered.
+func (r *tunRouter) configureMSS(tunnelMTU int, normalize bool) {
+	r.tunnelMTU = tunnelMTU
+	r.normalizeMSS = normalize
 }
 
 func (r *tunRouter) run() {
@@ -74,6 +103,14 @@ func (r *tunRouter) run() {
 		if sess == nil {
 			continue
 		}
+		if r.normalizeMSS {
+			limit := int(sess.mtu.Load())
+			clampDownlinkSYN(packet, limit)
+			if n > limit {
+				sendOversized(sess, packet, limit)
+				continue
+			}
+		}
 
 		copyPacket := getRoutedPacket(n)
 		copy(copyPacket, packet)
@@ -83,6 +120,26 @@ func (r *tunRouter) run() {
 			}
 			putRoutedPacket(copyPacket)
 		}
+	}
+}
+
+// sendOversized queues a downlink packet larger than limit as several packets that fit it.
+func sendOversized(sess *routedSession, packet []byte, limit int) {
+	emit := func(p []byte) {
+		cp := getRoutedPacket(len(p))
+		copy(cp, p)
+		if !sess.enqueue(cp) {
+			if dropLog.Ready() {
+				log.Printf("session %s: outbound queue full, dropping packet len=%d", sess.sid, len(cp))
+			}
+			putRoutedPacket(cp)
+		}
+	}
+	if splitTCP(packet, limit, emit) || fragmentIPv4(packet, limit, emit) {
+		return
+	}
+	if dropLog.Ready() {
+		log.Printf("session %s: dropping oversized packet limit=%d: %s", sess.sid, limit, packetSummary(packet))
 	}
 }
 
@@ -107,8 +164,10 @@ func (r *tunRouter) registerSession(sid string, send func([]byte) error) *routed
 		send:   send,
 		ips:    make(map[netip.Addr]struct{}),
 		out:    make(chan routedPacket, routedSessionQueueSize),
+		prio:   make(chan routedPacket, routedPrioQueueSize),
 		done:   make(chan struct{}),
 	}
+	s.mtu.Store(int32(r.tunnelMTU))
 	r.mu.Lock()
 	r.sessions[s] = struct{}{}
 	r.mu.Unlock()
@@ -179,6 +238,11 @@ func (s *routedSession) learnFromClientPacket(packet []byte) {
 
 func (s *routedSession) writeToTUN(packet []byte) error {
 	s.learnFromClientPacket(packet)
+	if s.router.normalizeMSS {
+		if clientMTU := normalizeUplinkSYN(packet); clientMTU > 0 {
+			s.mtu.Store(int32(min(max(clientMTU, minClientMTU), s.router.tunnelMTU)))
+		}
+	}
 	return s.router.writePacket(packet)
 }
 
@@ -189,9 +253,59 @@ func (s *routedSession) Write(packet []byte) (int, error) {
 	return len(packet), nil
 }
 
+// isLatencySensitive reports whether pkt is interactive traffic that should not queue behind
+// bulk downlink data: ICMP, small UDP (game and voice frames) and TCP segments without payload
+// (ACK, SYN, FIN, RST). Only fixed header fields are read; malformed packets report false.
+func isLatencySensitive(pkt []byte) bool {
+	var proto byte
+	var ipHdr, ipLen int
+	switch {
+	case len(pkt) >= 20 && pkt[0]>>4 == 4:
+		ipHdr = int(pkt[0]&0x0f) * 4
+		ipLen = int(binary.BigEndian.Uint16(pkt[2:4]))
+		proto = pkt[9]
+	case len(pkt) >= 40 && pkt[0]>>4 == 6:
+		ipHdr = 40
+		ipLen = ipHdr + int(binary.BigEndian.Uint16(pkt[4:6]))
+		proto = pkt[6]
+	default:
+		return false
+	}
+	if ipHdr < 20 || ipLen < ipHdr || ipLen > len(pkt) {
+		return false
+	}
+	switch proto {
+	case 1, 58: // ICMP, ICMPv6
+		return true
+	case 17: // UDP
+		return len(pkt) <= 600
+	case 6: // TCP
+		l4 := pkt[ipHdr:ipLen]
+		if len(l4) < 20 {
+			return false
+		}
+		tcpHdr := int(l4[12]>>4) * 4
+		if tcpHdr < 20 || tcpHdr > len(l4) {
+			return false
+		}
+		payload := len(l4) - tcpHdr
+		return payload == 0
+	}
+	return false
+}
+
 func (s *routedSession) enqueue(packet []byte) bool {
+	p := routedPacket{buf: packet, at: time.Now()}
+	if isLatencySensitive(packet) {
+		select {
+		case s.prio <- p:
+			return true
+		default:
+			// Lane full: use the bulk queue rather than dropping the packet.
+		}
+	}
 	select {
-	case s.out <- routedPacket{buf: packet, at: time.Now()}:
+	case s.out <- p:
 		return true
 	case <-s.done:
 		return false
@@ -203,40 +317,22 @@ func (s *routedSession) enqueue(packet []byte) bool {
 func (s *routedSession) writeLoop() {
 	var batch [32]routedPacket
 	for {
+		// Bulk turn: after routedPrioBurst latency-sensitive sends in a row, a waiting bulk
+		// packet goes out even if more of them are queued.
+		if s.prioRun >= routedPrioBurst {
+			select {
+			case p := <-s.out:
+				s.sendBulk(p, batch[:])
+				continue
+			default:
+			}
+		}
 		select {
-		case packet := <-s.out:
-			batch[0] = packet
-			n := 1
-			for n < len(batch) {
-				select {
-				case p := <-s.out:
-					batch[n] = p
-					n++
-				default:
-					goto sendBatch
-				}
-			}
-		sendBatch:
-			now := time.Now()
-			for i := 0; i < n; i++ {
-				p := batch[i]
-				batch[i] = routedPacket{}
-				if now.Sub(p.at) > routedMaxSojourn {
-					if dropLog.Ready() {
-						log.Printf("session %s: dropping stale downlink packet (queued %v)", s.sid, now.Sub(p.at).Round(time.Millisecond))
-					}
-					putRoutedPacket(p.buf)
-					continue
-				}
-				if err := s.send(p.buf); err != nil {
-					putRoutedPacket(p.buf)
-					if dropLog.Ready() {
-						log.Printf("session %s: send to client dropped packet len=%d: %v", s.sid, len(p.buf), err)
-					}
-					continue
-				}
-				putRoutedPacket(p.buf)
-			}
+		case p := <-s.prio:
+			s.prioRun++
+			s.sendOne(p, time.Now())
+		case p := <-s.out:
+			s.sendBulk(p, batch[:])
 		case <-s.done:
 			s.drain()
 			return
@@ -244,10 +340,70 @@ func (s *routedSession) writeLoop() {
 	}
 }
 
+// sendBulk sends first and the bulk packets already queued behind it (up to len(batch)).
+// Waiting latency-sensitive packets go out before each one, so a full batch cannot hold them up.
+func (s *routedSession) sendBulk(first routedPacket, batch []routedPacket) {
+	batch[0] = first
+	n := 1 + takeQueued(s.out, batch[1:])
+	for i := 0; i < n; i++ {
+		s.sendPrioWaiting()
+		p := batch[i]
+		batch[i] = routedPacket{}
+		s.prioRun = 0
+		s.sendOne(p, time.Now())
+	}
+}
+
+// sendPrioWaiting sends the latency-sensitive packets already queued, stopping after
+// routedPrioBurst in a row so that bulk is not starved.
+func (s *routedSession) sendPrioWaiting() {
+	for s.prioRun < routedPrioBurst {
+		select {
+		case p := <-s.prio:
+			s.prioRun++
+			s.sendOne(p, time.Now())
+		default:
+			return
+		}
+	}
+}
+
+// sendOne sends a queued packet unless it has gone stale, then returns its buffer to the pool.
+func (s *routedSession) sendOne(p routedPacket, now time.Time) {
+	if now.Sub(p.at) > routedMaxSojourn {
+		if dropLog.Ready() {
+			log.Printf("session %s: dropping stale downlink packet (queued %v)", s.sid, now.Sub(p.at).Round(time.Millisecond))
+		}
+		putRoutedPacket(p.buf)
+		return
+	}
+	if err := s.send(p.buf); err != nil && dropLog.Ready() {
+		log.Printf("session %s: send to client dropped packet len=%d: %v", s.sid, len(p.buf), err)
+	}
+	putRoutedPacket(p.buf)
+}
+
+// takeQueued moves up to len(dst) packets that are already waiting in q into dst.
+func takeQueued(q chan routedPacket, dst []routedPacket) int {
+	for n := range dst {
+		select {
+		case dst[n] = <-q:
+		default:
+			return n
+		}
+	}
+	return len(dst)
+}
+
 func (s *routedSession) drain() {
+	drainQueue(s.prio)
+	drainQueue(s.out)
+}
+
+func drainQueue(q chan routedPacket) {
 	for {
 		select {
-		case p := <-s.out:
+		case p := <-q:
 			putRoutedPacket(p.buf)
 		default:
 			return

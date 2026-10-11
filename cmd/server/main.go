@@ -68,6 +68,9 @@ type Config struct {
 	UseBucketPadding      bool     `json:"use_bucket_padding,omitempty"`
 	BucketMTU             int      `json:"bucket_mtu,omitempty"`
 	EnableIPv6            bool     `json:"enable_ipv6,omitempty"`
+	DisableMSSNormalize   bool     `json:"disable_mss_normalize"`
+	EgressIP              string   `json:"egress_ip"`
+	EgressIP6             string   `json:"egress_ip6"`
 }
 
 var (
@@ -198,6 +201,7 @@ func main() {
 		log.Printf("TUN unavailable — all clients will use echo mode")
 	} else {
 		tunRoutes = newTunRouter(globalTUN)
+		tunRoutes.configureMSS(tunnelMTUFor(cfg.MTU), !cfg.DisableMSSNormalize)
 		go tunRoutes.run()
 		if !cfg.DisableDNSProxy {
 			if err := startDNSProxy(cfg); err != nil {

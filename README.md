@@ -231,6 +231,64 @@ go build -buildmode=c-shared -o obsidian.dll ./bindings/c
 
 ---
 
+## Server Options
+
+### Exit IP (`egress_ip`, `egress_ip6`)
+
+By default, client traffic leaves the server through its main public IP. Websites see that address, and the VPN port and SSH are open on it. VPN detectors scan the IP that reaches a site and report "open proxy ports".
+
+`egress_ip` (IPv4) and `egress_ip6` (IPv6) set a separate public address for client traffic. The server rewrites the source address of outgoing traffic to this IP. Nothing listens on it, so a port scan comes back clean.
+
+```json
+{
+  "egress_ip": "203.0.113.10",
+  "egress_ip6": "2001:db8::10"
+}
+```
+
+Leave both empty to keep the default MASQUERADE behaviour.
+
+The provider must route this IP to your server, or return traffic never arrives. Assign it in the provider panel, or on the host:
+
+```bash
+ip addr add 203.0.113.10/32 dev eth0
+```
+
+The `ip addr` command does not survive a reboot. Make it permanent in your distribution's network config or in the provider panel. If the address is not on a local interface, the server logs a warning and keeps running. An invalid address stops the server at startup.
+
+iptables rules stay in place when the server restarts. If you change or remove `egress_ip`, delete the old rule by hand:
+
+```bash
+iptables -t nat -D POSTROUTING -s <tun_address> -o <out_iface> -j SNAT --to-source <old_ip>
+```
+
+Here `<tun_address>` is the value of `tun_address` (for example `10.8.0.1/24`).
+
+### Firewall
+
+A separate exit IP does not protect the server itself. The main IP can still be scanned. Keep the VPN ports open to everyone, allow SSH only from your own address, and drop the rest:
+
+```bash
+ufw allow from <your_ip> to any port 22 proto tcp
+ufw allow <vpn_port>/tcp
+ufw allow <vpn_port>/udp
+ufw default deny incoming
+ufw enable
+```
+
+Replace `<vpn_port>` with the `port` and `udp_port` values from the server config. ufw also drops forwarded traffic by default (`DEFAULT_FORWARD_POLICY` in `/etc/default/ufw`). The tunnel needs forwarding, so check that clients still reach the internet after you enable ufw.
+
+### MSS (`disable_mss_normalize`)
+
+Tunnel packets are smaller than normal Ethernet packets. A website can read the MSS value in the TCP handshake and tell that a tunnel is in the path. By default the server hides this:
+
+- It writes MSS 1460 (IPv4) or 1440 (IPv6) into outgoing SYN packets, the same values a plain Ethernet host sends.
+- It splits the segments coming back from the internet to fit the client's MTU.
+
+Set `"disable_mss_normalize": true` to go back to the old behaviour, where iptables clamps MSS with TCPMSS on the tunnel interface. The default is `false`.
+
+---
+
 ## License
 
 This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.

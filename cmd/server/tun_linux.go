@@ -20,7 +20,9 @@ const (
 	ioctlTUNSETIFF = 0x400454ca
 	iffTUN         = 0x0001
 	iffNOPI        = 0x1000
-	defaultTunMTU  = 1420
+	// With MSS normalization the kernel hands over full Ethernet-sized packets, which
+	// the router splits to the client's MTU (mss.go).
+	normalizedTunMTU = 1500
 )
 
 type ifReq struct {
@@ -60,6 +62,16 @@ func openTUN(cfg Config) io.ReadWriteCloser {
 	if _, err := netip.ParsePrefix(tunAddr); err != nil {
 		log.Printf("invalid tun_address %q: %v", tunAddr, err)
 		return nil
+	}
+
+	// Validate egress IPs before touching the device or sysctl.
+	egress4, err := parseEgressIP(cfg.EgressIP, false)
+	if err != nil {
+		log.Fatalf("invalid egress_ip %q: %v", cfg.EgressIP, err)
+	}
+	egress6, err := parseEgressIP(cfg.EgressIP6, true)
+	if err != nil {
+		log.Fatalf("invalid egress_ip6 %q: %v", cfg.EgressIP6, err)
 	}
 
 	fd, err := syscall.Open(tunDevice, syscall.O_RDWR, 0)
@@ -110,13 +122,14 @@ func openTUN(cfg Config) io.ReadWriteCloser {
 			log.Printf("configure tun ipv6 addr: %v", err)
 		}
 	}
-	mtu := cfg.MTU
-	if mtu <= 0 {
-		mtu = defaultTunMTU
-	} else if mtu > 1420 {
-		mtu = 1420
+	// mtu is the transport limit; it stays the same in both modes.
+	mtu := tunnelMTUFor(cfg.MTU)
+	normalize := !cfg.DisableMSSNormalize
+	linkMTU := mtu
+	if normalize {
+		linkMTU = normalizedTunMTU
 	}
-	if err := runCmd("ip", "link", "set", iface, "mtu", fmt.Sprintf("%d", mtu)); err != nil {
+	if err := runCmd("ip", "link", "set", iface, "mtu", fmt.Sprintf("%d", linkMTU)); err != nil {
 		log.Printf("configure tun mtu: %v", err)
 	}
 
@@ -127,8 +140,18 @@ func openTUN(cfg Config) io.ReadWriteCloser {
 	}
 	subnet := tunAddr // e.g. "10.8.0.1/24" — iptables accepts this for -s
 
-	// MASQUERADE IPv4
-	if exec.Command("iptables", "-t", "nat", "-C", "POSTROUTING",
+	// MASQUERADE IPv4, or SNAT to a fixed public IP when egress_ip is set
+	if egress4 != nil {
+		warnIfEgressUnassigned("egress_ip", egress4)
+		if exec.Command("iptables", "-t", "nat", "-C", "POSTROUTING",
+			"-s", subnet, "-o", outIface, "-j", "SNAT", "--to-source", egress4.String()).Run() != nil {
+			exec.Command("iptables", "-t", "nat", "-A", "POSTROUTING",
+				"-s", subnet, "-o", outIface, "-j", "SNAT", "--to-source", egress4.String()).Run()
+		}
+		_ = exec.Command("iptables", "-t", "nat", "-D", "POSTROUTING",
+			"-s", subnet, "-o", outIface, "-j", "MASQUERADE").Run()
+		log.Printf("IPv4 egress: %s SNAT to %s via %s", subnet, egress4, outIface)
+	} else if exec.Command("iptables", "-t", "nat", "-C", "POSTROUTING",
 		"-s", subnet, "-o", outIface, "-j", "MASQUERADE").Run() != nil {
 		exec.Command("iptables", "-t", "nat", "-A", "POSTROUTING",
 			"-s", subnet, "-o", outIface, "-j", "MASQUERADE").Run()
@@ -157,6 +180,9 @@ func openTUN(cfg Config) io.ReadWriteCloser {
 	for _, dir := range [][2]string{{"-i", iface}, {"-o", iface}} {
 		_ = exec.Command("iptables", "-t", "mangle", "-D", "FORWARD", dir[0], dir[1], "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--clamp-mss-to-pmtu").Run()
 		_ = exec.Command("iptables", "-t", "mangle", "-D", "FORWARD", dir[0], dir[1], "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--set-mss", fmt.Sprintf("%d", mss4)).Run()
+		if normalize {
+			continue
+		}
 		var args []string
 		if mtu >= 1500 {
 			args = []string{"-t", "mangle", "-A", "FORWARD", dir[0], dir[1], "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--clamp-mss-to-pmtu"}
@@ -171,7 +197,18 @@ func openTUN(cfg Config) io.ReadWriteCloser {
 		outIface6 := detectOutInterfaceIPv6()
 		if outIface6 != "" {
 			subnet6 := "fd00:8::/64"
-			if exec.Command("ip6tables", "-t", "nat", "-C", "POSTROUTING",
+			// NAT66 MASQUERADE, or SNAT to a fixed public IPv6 when egress_ip6 is set
+			if egress6 != nil {
+				warnIfEgressUnassigned("egress_ip6", egress6)
+				if exec.Command("ip6tables", "-t", "nat", "-C", "POSTROUTING",
+					"-s", subnet6, "-o", outIface6, "-j", "SNAT", "--to-source", egress6.String()).Run() != nil {
+					exec.Command("ip6tables", "-t", "nat", "-A", "POSTROUTING",
+						"-s", subnet6, "-o", outIface6, "-j", "SNAT", "--to-source", egress6.String()).Run()
+				}
+				_ = exec.Command("ip6tables", "-t", "nat", "-D", "POSTROUTING",
+					"-s", subnet6, "-o", outIface6, "-j", "MASQUERADE").Run()
+				log.Printf("IPv6 egress: %s SNAT to %s via %s", subnet6, egress6, outIface6)
+			} else if exec.Command("ip6tables", "-t", "nat", "-C", "POSTROUTING",
 				"-s", subnet6, "-o", outIface6, "-j", "MASQUERADE").Run() != nil {
 				exec.Command("ip6tables", "-t", "nat", "-A", "POSTROUTING",
 					"-s", subnet6, "-o", outIface6, "-j", "MASQUERADE").Run()
@@ -200,10 +237,17 @@ func openTUN(cfg Config) io.ReadWriteCloser {
 				_ = exec.Command("ip6tables", "-t", "mangle", "-D", "FORWARD", dir[0], dir[1], "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--clamp-mss-to-pmtu").Run()
 				_ = exec.Command("ip6tables", "-t", "mangle", "-D", "FORWARD", dir[0], dir[1], "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--set-mss", fmt.Sprintf("%d", mss4)).Run()
 				_ = exec.Command("ip6tables", "-t", "mangle", "-D", "FORWARD", dir[0], dir[1], "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--set-mss", fmt.Sprintf("%d", mss6)).Run()
+				if normalize {
+					continue
+				}
 				args := []string{"-t", "mangle", "-A", "FORWARD", dir[0], dir[1], "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--set-mss", fmt.Sprintf("%d", mss6)}
 				exec.Command("ip6tables", args...).Run()
 			}
-			log.Printf("Dual-Stack IPv6 NAT66 enabled via %s (prefix: %s, MSS: %d)", outIface6, subnet6, mss6)
+			if normalize {
+				log.Printf("Dual-Stack IPv6 NAT66 enabled via %s (prefix: %s, MSS normalized in server)", outIface6, subnet6)
+			} else {
+				log.Printf("Dual-Stack IPv6 NAT66 enabled via %s (prefix: %s, MSS: %d)", outIface6, subnet6, mss6)
+			}
 		} else {
 			log.Printf("Dual-Stack IPv6 in-tunnel ULA %s enabled (host has no external IPv6 default route)", tunAddr6)
 		}
@@ -288,4 +332,3 @@ func detectOutInterfaceIPv6() string {
 	}
 	return ""
 }
-
