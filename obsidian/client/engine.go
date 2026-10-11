@@ -243,11 +243,18 @@ func (s *Session) Start(dev io.ReadWriteCloser) error {
 			return err
 		}
 
-		s.setStatus(StatusReconnecting, fmt.Sprintf("Connection dropped: %v — reconnecting in 3s", err))
+		// A stalled UDP path gets a fresh socket on the next attempt, so skip the usual 3s wait.
+		delay := 3 * time.Second
+		reason := fmt.Sprintf("Connection dropped: %v — reconnecting in 3s", err)
+		if errors.Is(err, ErrUDPStalled) {
+			delay = 0
+			reason = "UDP path stalled, reconnecting now"
+		}
+		s.setStatus(StatusReconnecting, reason)
 		select {
 		case <-s.stopCh:
 			return nil
-		case <-time.After(3 * time.Second):
+		case <-time.After(delay):
 			attempt++
 		}
 	}
@@ -316,6 +323,42 @@ func (s *Session) setStatus(st, detail string) {
 	}
 	if s.debug {
 		log.Printf("[ObsidianClient] status=%s detail=%s", st, detail)
+	}
+}
+
+const (
+	UDPProbeAfter = 2500 * time.Millisecond
+	UDPDeadAfter  = 8 * time.Second
+)
+
+var ErrUDPStalled = errors.New("udp data path stalled")
+
+type UDPHealthAction int
+
+const (
+	UDPHealthNone UDPHealthAction = iota
+	UDPHealthProbe
+	UDPHealthFailover
+	UDPHealthReconnect
+)
+
+// DecideUDPHealth picks the next UDP health action. silent is how long the
+// oldest unanswered UDP send has waited for a reply (0 when nothing is pending).
+// Inactive UDP is handled by the monitor's own re-activation check, so it gets None here.
+func DecideUDPHealth(silent time.Duration, everReceived, active bool) UDPHealthAction {
+	if !active {
+		return UDPHealthNone
+	}
+	switch {
+	case silent >= UDPDeadAfter:
+		if everReceived {
+			return UDPHealthReconnect
+		}
+		return UDPHealthFailover
+	case silent >= UDPProbeAfter:
+		return UDPHealthProbe
+	default:
+		return UDPHealthNone
 	}
 }
 
@@ -449,6 +492,8 @@ func (s *Session) runConnection(tun io.ReadWriteCloser) error {
 			udpCh.BucketMTU = s.tunnelCfg.BucketMTU
 		}
 		udpCh.MaxTrailer = s.tunnelCfg.MaxTrailer
+		// Taken before warmup so that warmup echoes count as proof the UDP path works.
+		udpStartNano := time.Now().UnixNano()
 		warmupUDPAddress(udpCh)
 
 		udpProto := "UDP"
@@ -456,11 +501,12 @@ func (s *Session) runConnection(tun io.ReadWriteCloser) error {
 		s.activeProto.Store(&udpProto)
 
 		var (
-			lastUDPRecvNano atomic.Int64
-			udpActive       atomic.Bool
+			udpActive atomic.Bool
+			// First UDP data send still waiting for any authenticated reply; 0 when none.
+			udpPendingNano atomic.Int64
 		)
 		udpActive.Store(true)
-		lastUDPRecvNano.Store(time.Now().UnixNano())
+		errCh := make(chan error, 4) // one slot per goroutine below, so none can block
 
 		// Port hopping
 		if len(s.cfg.PortPool) > 0 {
@@ -501,16 +547,39 @@ func (s *Session) runConnection(tun io.ReadWriteCloser) error {
 				case <-ticker.C:
 					ticks++
 					now := time.Now().UnixNano()
-					lastRecv := lastUDPRecvNano.Load()
-					if !udpActive.Load() {
+					active := udpActive.Load()
+					authRecv := udpCh.LastAuthRecvNano()
+					// Any authenticated packet after the pending send proves the path is alive, even one Recv skipped.
+					if pending := udpPendingNano.Load(); pending != 0 && authRecv >= pending {
+						udpPendingNano.CompareAndSwap(pending, 0)
+					}
+					var silent time.Duration
+					if pending := udpPendingNano.Load(); active && pending != 0 {
+						silent = time.Duration(now - pending)
+					}
+					everReceived := authRecv > udpStartNano
+					switch DecideUDPHealth(silent, everReceived, active) {
+					case UDPHealthProbe:
 						_ = udpCh.Send(nil)
-						if (now - lastRecv) < 3*time.Second.Nanoseconds() {
-							udpActive.Store(true)
-							s.activeProto.Store(&udpProto)
+					case UDPHealthFailover:
+						udpActive.Store(false)
+						s.activeProto.Store(&tcpProto)
+						udpPendingNano.Store(0)
+					case UDPHealthReconnect:
+						errCh <- ErrUDPStalled
+						return
+					default:
+						if !active {
+							_ = udpCh.Send(nil)
+							if (now - authRecv) < 3*time.Second.Nanoseconds() {
+								udpActive.Store(true)
+								udpPendingNano.Store(0)
+								s.activeProto.Store(&udpProto)
+							}
+						} else if ticks%8 == 0 {
+							// Send periodic keepalive to ensure carrier CGNAT pinholes stay open during quiet periods
+							_ = udpCh.Send(nil)
 						}
-					} else if ticks%8 == 0 {
-						// Send periodic keepalive to ensure carrier CGNAT pinholes stay open during quiet periods
-						_ = udpCh.Send(nil)
 					}
 				case <-tunnel.Done():
 					return
@@ -522,9 +591,8 @@ func (s *Session) runConnection(tun io.ReadWriteCloser) error {
 			}
 		}()
 
-		errCh := make(chan error, 3)
-		go func() { errCh <- s.copyTunToData(tun, udpCh, tunnel, &udpActive, &tcpProto) }()
-		go func() { errCh <- s.copyUDPToTun(udpCh, tun, &lastUDPRecvNano) }()
+		go func() { errCh <- s.copyTunToData(tun, udpCh, tunnel, &udpActive, &tcpProto, &udpPendingNano) }()
+		go func() { errCh <- s.copyUDPToTun(udpCh, tun) }()
 		go func() { errCh <- s.copyTunnelToTun(tunnel, tun) }()
 
 		select {
@@ -557,7 +625,7 @@ func (s *Session) runConnection(tun io.ReadWriteCloser) error {
 	}
 }
 
-func (s *Session) copyTunToData(tun io.ReadWriter, ch *obsidian.UDPChannel, tunnel *obsidian.Tunnel, udpActive *atomic.Bool, tcpProto *string) error {
+func (s *Session) copyTunToData(tun io.ReadWriter, ch *obsidian.UDPChannel, tunnel *obsidian.Tunnel, udpActive *atomic.Bool, tcpProto *string, udpPending *atomic.Int64) error {
 	buf := make([]byte, 2048)
 	sendBuf := make([]byte, 2048)
 	rejectBuf := make([]byte, obsidian.IPv6RejectBufSize)
@@ -594,6 +662,9 @@ func (s *Session) copyTunToData(tun io.ReadWriter, ch *obsidian.UDPChannel, tunn
 				_ = tunnel.SendData(packet)
 			} else {
 				udpFailCount.Store(0)
+				if udpPending.Load() == 0 {
+					udpPending.CompareAndSwap(0, time.Now().UnixNano())
+				}
 			}
 		} else {
 			if err := tunnel.SendData(packet); err != nil {
@@ -611,7 +682,7 @@ func (s *Session) copyTunToData(tun io.ReadWriter, ch *obsidian.UDPChannel, tunn
 	}
 }
 
-func (s *Session) copyUDPToTun(ch *obsidian.UDPChannel, tun io.Writer, lastUDPRecvNano *atomic.Int64) error {
+func (s *Session) copyUDPToTun(ch *obsidian.UDPChannel, tun io.Writer) error {
 	buf := make([]byte, 2048)
 	for {
 		if s.isStopped() {
@@ -628,9 +699,6 @@ func (s *Session) copyUDPToTun(ch *obsidian.UDPChannel, tun io.Writer, lastUDPRe
 			default:
 				return fmt.Errorf("udp recv: %w", err)
 			}
-		}
-		if lastUDPRecvNano != nil {
-			lastUDPRecvNano.Store(time.Now().UnixNano())
 		}
 		s.pktsReceived.Add(1)
 		s.bytesReceived.Add(uint64(n))

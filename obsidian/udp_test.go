@@ -364,3 +364,59 @@ func TestWebRTCSTUNMultiplexing(t *testing.T) {
 	}
 }
 
+func TestEmptyKeepaliveAdvancesLastAuthRecv(t *testing.T) {
+	srvAddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srvConn, err := net.ListenUDP("udp", srvAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srvConn.Close()
+
+	var sk SessionKeys
+	_, _ = rand.Read(sk.ClientKey[:])
+	_, _ = rand.Read(sk.ServerKey[:])
+	_, _ = rand.Read(sk.SessionID[:])
+
+	cliConn, err := net.DialUDP("udp", nil, srvConn.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cliCh, err := NewUDPChannel(cliConn, DeriveUDPKeys(&sk, true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cliCh.Close()
+	srvCh, err := NewUDPChannel(srvConn, DeriveUDPKeys(&sk, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	before := time.Now().UnixNano()
+	if err := cliCh.Send(nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// Recv consumes the empty keepalive internally and keeps waiting, so the read deadline ends it.
+	_ = srvConn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	buf := make([]byte, 2048)
+	if n, err := srvCh.Recv(buf); err == nil {
+		t.Fatalf("Recv returned %d bytes for an empty keepalive, want it skipped", n)
+	}
+	if ts := srvCh.LastAuthRecvNano(); ts < before {
+		t.Fatalf("LastAuthRecvNano = %d after keepalive, want >= %d", ts, before)
+	}
+
+	// A real packet sent after the keepalive is still delivered normally.
+	_ = srvConn.SetReadDeadline(time.Time{})
+	msg := []byte("after-keepalive")
+	if err := cliCh.Send(msg); err != nil {
+		t.Fatal(err)
+	}
+	n, err := srvCh.Recv(buf)
+	if err != nil || !bytes.Equal(buf[:n], msg) {
+		t.Fatalf("expected %q, got %q (err: %v)", msg, buf[:n], err)
+	}
+}

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/hkdf"
@@ -290,6 +291,7 @@ type UDPChannel struct {
 	prevTag          [UDPTagSize]byte
 	sendCtr          atomic.Uint64
 	replay           replayWindow
+	lastAuthRecvNano atomic.Int64
 	EnableSTUN       bool
 	EnableSRTP       bool
 	ssrc             uint32
@@ -531,6 +533,7 @@ func (ch *UDPChannel) Recv(dst []byte) (int, error) {
 		if !ch.replay.Check(ctr) {
 			continue
 		}
+		ch.lastAuthRecvNano.Store(time.Now().UnixNano())
 
 		// Unframe Bucket Padding length if present
 		if ch.UseBucketPadding && len(plain) >= 2 {
@@ -551,6 +554,12 @@ func (ch *UDPChannel) Recv(dst []byte) (int, error) {
 
 func (ch *UDPChannel) Close() error {
 	return ch.conn.Close()
+}
+
+// LastAuthRecvNano returns the arrival time (UnixNano) of the last authenticated datagram,
+// including empty keepalive echoes that Recv does not return. 0 if none arrived yet.
+func (ch *UDPChannel) LastAuthRecvNano() int64 {
+	return ch.lastAuthRecvNano.Load()
 }
 
 // ── UDPMux (server-side, one shared socket, many sessions) ───────────────────
