@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -623,12 +624,24 @@ func startCommand(label, name string, args ...string) {
 }
 
 func addInterfaceRoute(dest, mask, ifIndex string) {
+	if idx, err := strconv.ParseUint(ifIndex, 10, 32); err == nil && idx != 0 {
+		if err := addRouteAPI(dest, mask, "", uint32(idx)); err == nil {
+			return
+		} else {
+			debugf("route API failed for %s/%s: %v, using route.exe", dest, mask, err)
+		}
+	}
 	runCommand("route add "+dest+"/"+mask, "route", "add", dest, "mask", mask, "0.0.0.0", "metric", "1", "if", ifIndex)
 }
 
 func addGatewayRoute(dest, mask, gateway string) {
 	if gateway == "" {
 		return
+	}
+	if err := addRouteAPI(dest, mask, gateway, 0); err == nil {
+		return
+	} else {
+		debugf("route API failed for %s/%s: %v, using route.exe", dest, mask, err)
 	}
 	runCommand("route add "+dest+"/"+mask, "route", "add", dest, "mask", mask, gateway, "metric", "1")
 }
