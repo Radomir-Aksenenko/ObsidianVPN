@@ -110,6 +110,66 @@ func TestSessionWithPacketDevice(t *testing.T) {
 	}
 }
 
+// A server that accepts and never answers keeps the handshake pending for 6 s. NetworkChanged must cut
+// that connection and dial again at once, without the 6 s handshake wait or the 3 s reconnect delay.
+func TestNetworkChangedReconnectsImmediately(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	accepted := make(chan net.Conn, 4)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			accepted <- c
+		}
+	}()
+
+	host, port, _ := net.SplitHostPort(ln.Addr().String())
+	kp, _ := obsidian.GenerateKeypair()
+	cfg := &obsidian.ClientConfig{
+		ServerPublicKey: hex.EncodeToString(kp.Public[:]),
+		ServerHost:      host,
+		ServerPort:      port,
+		NoTLS:           true,
+	}
+	session, err := NewSession(cfg)
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	dev := tun.NewPacketDevice("test-tun", 1420, 64)
+	defer dev.Close()
+	session.StartAsync(dev)
+	defer session.Stop()
+
+	first := waitConn(t, accepted, 2*time.Second, "first connection")
+	defer first.Close()
+
+	start := time.Now()
+	session.NetworkChanged()
+	second := waitConn(t, accepted, 2*time.Second, "reconnect after NetworkChanged")
+	defer second.Close()
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("reconnect took %v, want well under the 3s retry delay", elapsed)
+	}
+}
+
+func waitConn(t *testing.T, ch <-chan net.Conn, d time.Duration, what string) net.Conn {
+	t.Helper()
+	select {
+	case c := <-ch:
+		return c
+	case <-time.After(d):
+		t.Fatalf("timed out waiting for %s", what)
+		return nil
+	}
+}
+
 func TestDecideUDPHealth(t *testing.T) {
 	tests := []struct {
 		name         string

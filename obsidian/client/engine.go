@@ -113,6 +113,11 @@ type Session struct {
 	doneCh chan struct{}
 	stopOnce sync.Once
 
+	// netChangeCh carries NetworkChanged signals to the running connection (capacity 1, signals coalesce).
+	// netChanged records that the last connection was cut by such a signal, so the reconnect loop skips its delay.
+	netChangeCh chan struct{}
+	netChanged  atomic.Bool
+
 	// rejectLimiter bounds locally generated IPv6 rejects (see rejectIPv6).
 	rejectLimiter *obsidian.RejectLimiter
 }
@@ -169,6 +174,7 @@ func NewSession(cfg *obsidian.ClientConfig, opts ...Option) (*Session, error) {
 		status:        StatusDisconnected,
 		stopCh:        make(chan struct{}),
 		doneCh:        make(chan struct{}),
+		netChangeCh:   make(chan struct{}, 1),
 	}
 	s.activeProto.Store(&proto)
 
@@ -244,9 +250,13 @@ func (s *Session) Start(dev io.ReadWriteCloser) error {
 		}
 
 		// A stalled UDP path gets a fresh socket on the next attempt, so skip the usual 3s wait.
+		// The same holds after a network change: the new network is already usable.
 		delay := 3 * time.Second
 		reason := fmt.Sprintf("Connection dropped: %v — reconnecting in 3s", err)
-		if errors.Is(err, ErrUDPStalled) {
+		if s.netChanged.Swap(false) {
+			delay = 0
+			reason = "Network changed, reconnecting now"
+		} else if errors.Is(err, ErrUDPStalled) {
 			delay = 0
 			reason = "UDP path stalled, reconnecting now"
 		}
@@ -272,6 +282,33 @@ func (s *Session) Stop() {
 	s.stopOnce.Do(func() {
 		close(s.stopCh)
 	})
+}
+
+// NetworkChanged tells the session that the device switched networks (Wi-Fi to cellular and back,
+// or connectivity returned). The current connection is bound to the old network and may stay half-open
+// for minutes, so it is dropped and the session reconnects at once over the new one.
+// Safe to call at any time and from any goroutine; calls made before a connection exists apply to it.
+func (s *Session) NetworkChanged() {
+	select {
+	case s.netChangeCh <- struct{}{}:
+	default:
+	}
+}
+
+// watchNetworkChange closes conn when NetworkChanged is called while this connection is alive.
+// The returned function stops the watcher and must be called when the connection ends.
+func (s *Session) watchNetworkChange(conn net.Conn) (stop func()) {
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-s.netChangeCh:
+			s.netChanged.Store(true)
+			_ = conn.Close()
+		case <-done:
+		case <-s.stopCh:
+		}
+	}()
+	return func() { close(done) }
 }
 
 // Wait blocks until the session terminates.
@@ -368,6 +405,12 @@ func (s *Session) runConnection(tun io.ReadWriteCloser) error {
 		err  error
 	)
 
+	// A signal that arrived while the previous connection was already ending is spent.
+	select {
+	case <-s.netChangeCh:
+	default:
+	}
+
 	isReality := s.cfg.RealityEnabled || s.cfg.RealityAuthKey != "" || s.cfg.RealitySNI != ""
 	transportCfg := obsidian.ClientTransportConfig{
 		ServerHost:      s.cfg.ServerHost,
@@ -410,6 +453,7 @@ func (s *Session) runConnection(tun io.ReadWriteCloser) error {
 		return fmt.Errorf("dial: %w", err)
 	}
 	defer conn.Close()
+	defer s.watchNetworkChange(conn)()
 
 	_ = conn.SetDeadline(time.Now().Add(6 * time.Second))
 

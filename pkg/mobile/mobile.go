@@ -275,6 +275,21 @@ func StopTunnel(sessionID string) error {
 	return nil
 }
 
+// NetworkChanged reports that the device switched networks (Wi-Fi to cellular, cellular to Wi-Fi,
+// or connectivity came back). The session drops its connection, which is bound to the old network,
+// and reconnects immediately instead of waiting for the old socket to time out.
+func NetworkChanged(sessionID string) error {
+	sessionMu.RLock()
+	holder, ok := activeSessions[sessionID]
+	sessionMu.RUnlock()
+
+	if !ok {
+		return errors.New("session not found")
+	}
+	holder.session.NetworkChanged()
+	return nil
+}
+
 // GetStats returns current metrics for a session.
 func GetStats(sessionID string) (*MobileStats, error) {
 	sessionMu.RLock()
