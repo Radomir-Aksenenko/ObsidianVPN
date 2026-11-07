@@ -163,6 +163,9 @@ func main() {
 		}
 	}
 	revocations, err := newRevocationStore(cfg.RevokedClients, cfg.RevocationFile)
+	if err != nil {
+		log.Printf("ERROR: revocation file unusable, rejecting new sessions until it is repaired: %v", err)
+	}
 	if cfg.CookieSecret != "" {
 		b, err := hex.DecodeString(cfg.CookieSecret)
 		if err == nil && len(b) == 32 {
@@ -202,6 +205,7 @@ func main() {
 	} else {
 		tunRoutes = newTunRouter(globalTUN)
 		tunRoutes.configureMSS(tunnelMTUFor(cfg.MTU), !cfg.DisableMSSNormalize)
+		tunRoutes.configureAddressing(cfg.TunAddress)
 		go tunRoutes.run()
 		if !cfg.DisableDNSProxy {
 			if err := startDNSProxy(cfg); err != nil {
@@ -358,7 +362,10 @@ func handleClient(conn net.Conn, priv, pub [obsidian.KeySize]byte,
 		log.Printf("rate limit exceeded, dropping %s", conn.RemoteAddr())
 		return
 	}
-	defer rateLimiter.Release()
+	// The limit covers handshakes in progress, a running session must not hold a slot.
+	var releaseOnce sync.Once
+	releaseHandshakeSlot := func() { releaseOnce.Do(rateLimiter.Release) }
+	defer releaseHandshakeSlot()
 
 	if cfg.NoTLS {
 		if err := obsidian.RecvHTTP2Preface(conn); err != nil {
@@ -410,6 +417,7 @@ func handleClient(conn net.Conn, priv, pub [obsidian.KeySize]byte,
 	if _, err := conn.Write(serverHelloFrame); err != nil {
 		return
 	}
+	releaseHandshakeSlot()
 
 	sessionID := hex.EncodeToString(hs.SessionKeys.SessionID[:4])
 	log.Printf("session %s: ready, peer=%s", sessionID, conn.RemoteAddr())
@@ -460,6 +468,7 @@ func handleClient(conn net.Conn, priv, pub [obsidian.KeySize]byte,
 			}
 			return tunnel.SendData(packet)
 		})
+		route.setIdentity(hs.ClientStaticPub())
 		defer route.Close()
 		udpDone := make(chan struct{})
 		go func() {
@@ -475,6 +484,7 @@ func handleClient(conn net.Conn, priv, pub [obsidian.KeySize]byte,
 	} else {
 		log.Printf("session %s: TCP relay started", sessionID)
 		route := tunRoutes.registerSession(sessionID, tunnel.SendData)
+		route.setIdentity(hs.ClientStaticPub())
 		defer route.Close()
 		tunnelToTUN(tunnel, newClientSink(route, cfg.EnableIPv6), sessionID)
 	}

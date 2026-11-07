@@ -10,6 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"obsidian/obsidian"
 )
 
 // routedSessionQueueSize bounds downlink packets queued per client. It only has to absorb
@@ -47,7 +49,12 @@ type tunRouter struct {
 
 	mu       sync.RWMutex
 	sessions map[*routedSession]struct{}
-	byIP     map[netip.Addr]*routedSession
+	// byIP maps server-side client addresses to their sessions (see client_addr.go).
+	byIP map[netip.Addr]*routedSession
+	// reserved holds the addresses of closed sessions for their devices.
+	reserved map[netip.Addr]reservedAddr
+	// pool4 and pool6 hold the server's own address and the prefix clients are numbered from.
+	pool4, pool6 netip.Prefix
 
 	writeMu sync.Mutex
 
@@ -63,10 +70,16 @@ type routedSession struct {
 	send   func([]byte) error
 
 	// mtu is the largest downlink packet this client accepts.
-	mtu  atomic.Int32
-	ips  map[netip.Addr]struct{}
-	out  chan routedPacket
-	prio chan routedPacket
+	mtu atomic.Int32
+	// bind4 and bind6 hold this client's addresses, one per IP family.
+	bind4, bind6 atomic.Pointer[addrBinding]
+	// identity is the device's key, guarded by router.mu.
+	identity    [obsidian.KeySize]byte
+	hasIdentity bool
+	// superseded is set when the same device reconnected, guarded by router.mu.
+	superseded bool
+	out        chan routedPacket
+	prio       chan routedPacket
 	// prioRun counts latency-sensitive sends since the last bulk send. writeLoop only.
 	prioRun int
 	done    chan struct{}
@@ -78,6 +91,9 @@ func newTunRouter(tun io.ReadWriter) *tunRouter {
 		tun:          tun,
 		sessions:     make(map[*routedSession]struct{}),
 		byIP:         make(map[netip.Addr]*routedSession),
+		reserved:     make(map[netip.Addr]reservedAddr),
+		pool4:        netip.MustParsePrefix("10.8.0.1/24"),
+		pool6:        netip.MustParsePrefix(serverTunAddr6),
 		tunnelMTU:    maxTunnelMTU,
 		normalizeMSS: true,
 	}
@@ -103,6 +119,7 @@ func (r *tunRouter) run() {
 		if sess == nil {
 			continue
 		}
+		sess.restoreDownlink(packet)
 		if r.normalizeMSS {
 			limit := int(sess.mtu.Load())
 			clampDownlinkSYN(packet, limit)
@@ -162,7 +179,6 @@ func (r *tunRouter) registerSession(sid string, send func([]byte) error) *routed
 		router: r,
 		sid:    sid,
 		send:   send,
-		ips:    make(map[netip.Addr]struct{}),
 		out:    make(chan routedPacket, routedSessionQueueSize),
 		prio:   make(chan routedPacket, routedPrioQueueSize),
 		done:   make(chan struct{}),
@@ -210,34 +226,10 @@ func (r *tunRouter) singleSession() *routedSession {
 	return nil
 }
 
-func (s *routedSession) learnFromClientPacket(packet []byte) {
-	src, _, ok := packetEndpoints(packet)
-	if !ok || !src.IsValid() || src.IsUnspecified() || src.IsMulticast() {
-		return
-	}
-
-	s.router.mu.Lock()
-	defer s.router.mu.Unlock()
-
-	if _, active := s.router.sessions[s]; !active {
-		return
-	}
-
-	if _, exists := s.ips[src]; exists {
-		return
-	}
-
-	if prev := s.router.byIP[src]; prev != nil && prev != s {
-		delete(prev.ips, src)
-	}
-	s.ips[src] = struct{}{}
-	s.router.byIP[src] = s
-
-	log.Printf("session %s: learned client IP %s", s.sid, src)
-}
-
 func (s *routedSession) writeToTUN(packet []byte) error {
-	s.learnFromClientPacket(packet)
+	if !s.translateUplink(packet) {
+		return nil
+	}
 	if s.router.normalizeMSS {
 		if clientMTU := normalizeUplinkSYN(packet); clientMTU > 0 {
 			s.mtu.Store(int32(min(max(clientMTU, minClientMTU), s.router.tunnelMTU)))
@@ -417,11 +409,7 @@ func (s *routedSession) Close() {
 
 		s.router.mu.Lock()
 		delete(s.router.sessions, s)
-		for ip := range s.ips {
-			if s.router.byIP[ip] == s {
-				delete(s.router.byIP, ip)
-			}
-		}
+		s.releaseAddresses()
 		s.router.mu.Unlock()
 	})
 }

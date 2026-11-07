@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"sync"
 	"time"
@@ -29,12 +30,19 @@ type revocationFile struct {
 
 func newRevocationStore(static []string, path string) (*revocationStore, error) {
 	r := &revocationStore{path: path, keys: make(map[[obsidian.KeySize]byte]struct{})}
-	if err := r.add(static); err != nil {
-		return nil, err
+	// One bad entry names no real key. It must not stop the server after an update, or take the
+	// valid entries down with it.
+	for _, value := range static {
+		if err := r.add([]string{value}); err != nil {
+			log.Printf("ERROR: ignoring revoked_clients entry: %v", err)
+		}
 	}
 	if path != "" {
 		if err := r.reload(true); err != nil {
-			return nil, err
+			// A bad file must not stop the server or let revoked keys in: IsRevoked fails
+			// closed from now on and recovers by itself once the file is repaired.
+			r.initialized = true
+			return r, err
 		}
 	}
 	return r, nil

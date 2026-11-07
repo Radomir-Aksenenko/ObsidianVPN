@@ -117,7 +117,7 @@ func openTUN(cfg Config) io.ReadWriteCloser {
 	// Dual-Stack IPv6 in-tunnel prefix
 	tunAddr6 := ""
 	if cfg.EnableIPv6 {
-		tunAddr6 = "fd00:8::1/64"
+		tunAddr6 = serverTunAddr6
 		if err := runCmd("ip", "-6", "addr", "add", tunAddr6, "dev", iface); err != nil {
 			log.Printf("configure tun ipv6 addr: %v", err)
 		}
