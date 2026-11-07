@@ -210,11 +210,15 @@ func parseFingerprint(name string) *utls.ClientHelloID {
 	}
 }
 
+// realityAuth picks the SessionID format this server understands, across reconnects.
+var realityAuth obsidian.RealityAuthSelector
+
 func runSession(cfg Config, serverPub [obsidian.KeySize]byte, clientStatic *obsidian.Keypair, obfCfg obsidian.ObfuscationConfig, tunnelCfg obsidian.TunnelConfig, tun io.ReadWriter) error {
 	var (
 		conn net.Conn
 		err  error
 	)
+	confirmHandshake := func() {}
 	isReality := cfg.RealityEnabled || cfg.RealityAuthKey != "" || cfg.RealitySNI != ""
 	if isReality {
 		var authKeyBytes []byte
@@ -236,14 +240,29 @@ func runSession(cfg Config, serverPub [obsidian.KeySize]byte, clientStatic *obsi
 		fp := parseFingerprint(cfg.Fingerprint)
 		debugf("transport: dialing via REALITY-Plus (SNI=%s)", sni)
 		conn, err = obsidian.DialObsidianREALITY(obsidian.ClientTransportConfig{
-			ServerHost:     cfg.ServerHost,
-			ServerPort:     cfg.ServerPort,
-			SNI:            sni,
-			SNIPool:        cfg.SNIPool,
-			RealityEnabled: true,
-			RealityAuthKey: authKeyBytes,
-			Fingerprint:    fp,
+			ServerHost:        cfg.ServerHost,
+			ServerPort:        cfg.ServerPort,
+			SNI:               sni,
+			SNIPool:           cfg.SNIPool,
+			RealityEnabled:    true,
+			RealityAuthKey:    authKeyBytes,
+			RealityLegacyAuth: realityAuth.Legacy(),
+			Fingerprint:       fp,
 		})
+		if err == nil {
+			handshook := false
+			defer func() {
+				if !handshook {
+					realityAuth.Reject()
+				}
+			}()
+			confirmHandshake = func() {
+				handshook = true
+				realityAuth.Confirm()
+			}
+		} else if errors.Is(err, obsidian.ErrRealityNoServerHello) {
+			realityAuth.Reject()
+		}
 	} else if cfg.NoTLS {
 		debugf("transport: dialing raw TCP")
 		conn, err = obsidian.DialTCPTimeout(cfg.ServerHost, cfg.ServerPort, 3*time.Second)
@@ -327,6 +346,7 @@ func runSession(cfg Config, serverPub [obsidian.KeySize]byte, clientStatic *obsi
 	if err != nil {
 		return fmt.Errorf("process server hello: %w", err)
 	}
+	confirmHandshake()
 	_ = conn.SetDeadline(time.Time{})
 
 	sessionID := hex.EncodeToString(hs.SessionKeys.SessionID[:4])
@@ -341,7 +361,15 @@ func runSession(cfg Config, serverPub [obsidian.KeySize]byte, clientStatic *obsi
 		if err != nil {
 			return fmt.Errorf("resolve udp: %w", err)
 		}
-		udpConn, err := net.DialUDP("udp4", nil, udpAddr)
+		var (
+			udpConn *net.UDPConn
+			hopAddr *net.UDPAddr
+		)
+		if len(cfg.PortPool) > 0 {
+			udpConn, hopAddr, err = obsidian.DialHoppingUDP("udp4", udpAddr.String(), nil)
+		} else {
+			udpConn, err = net.DialUDP("udp4", nil, udpAddr)
+		}
 		if err != nil {
 			return fmt.Errorf("dial udp: %w", err)
 		}
@@ -352,6 +380,7 @@ func runSession(cfg Config, serverPub [obsidian.KeySize]byte, clientStatic *obsi
 			return fmt.Errorf("udp channel: %w", err)
 		}
 		defer udpCh.Close()
+		udpCh.SwitchDestination(hopAddr)
 		udpCh.UseBucketPadding = tunnelCfg.UseBucketPadding
 		if tunnelCfg.BucketMTU > 0 {
 			udpCh.BucketMTU = tunnelCfg.BucketMTU

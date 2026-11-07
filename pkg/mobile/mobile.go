@@ -16,10 +16,12 @@ import (
 )
 
 func init() {
-	// Restrict Go runtime memory inside iOS NetworkExtension (15 MB Jetsam ceiling)
-	// 8 MB soft target guarantees Go + Swift + system libraries never exceed 15 MB Jetsam limit
-	debug.SetMemoryLimit(8 * 1024 * 1024)
-	debug.SetGCPercent(40)
+	// A soft limit for the Go runtime inside a mobile VPN process. The app targets iOS 17, where
+	// the old 15 MB Network Extension ceiling no longer applies. The runtime with a live session
+	// does not fit in less than about 16 MB: at the previous 8 MB the collector ran about 2400
+	// times a second and took 35% of the CPU under load, at 24 MB about 75 times and 1.3%.
+	debug.SetMemoryLimit(24 * 1024 * 1024)
+	debug.SetGCPercent(100)
 }
 
 // SocketProtector is implemented by mobile host applications (e.g. Android VpnService)

@@ -106,9 +106,134 @@ func GenerateSessionIDWithTimestamp(authKey []byte, sni string, ts int64) ([TLSS
 	return sessionID, nil
 }
 
-// VerifySessionID performs constant-time validation of the SessionID token against the pre-shared auth key,
-// target SNI, and timestamp freshness window.
+// GenerateMaskedSessionID constructs a SessionID that hides the timestamp, so that all 32 bytes
+// look random to an observer:
+//
+//	SessionID = Nonce(16B) || (UnixTS(8B) XOR Mask) || HMAC-SHA256(authKey, Nonce || MaskedTS || SNI)[:8]
+//
+// Servers older than this format reject it, see RealityAuthSelector.
+func GenerateMaskedSessionID(authKey []byte, sni string) ([TLSSessionIDSize]byte, error) {
+	return generateMaskedSessionIDAt(authKey, sni, time.Now().Unix())
+}
+
+func generateMaskedSessionIDAt(authKey []byte, sni string, ts int64) ([TLSSessionIDSize]byte, error) {
+	var sessionID [TLSSessionIDSize]byte
+	if _, err := io.ReadFull(rand.Reader, sessionID[:AuthNonceSize]); err != nil {
+		return sessionID, fmt.Errorf("generate auth nonce: %w", err)
+	}
+	mask := authTimestampMask(authKey, sessionID[:AuthNonceSize])
+	binary.BigEndian.PutUint64(sessionID[AuthNonceSize:AuthNonceSize+AuthTimestampSize], uint64(ts)^mask)
+	tag := computeAuthTag(authKey, sessionID[:AuthNonceSize+AuthTimestampSize], sni)
+	copy(sessionID[AuthNonceSize+AuthTimestampSize:], tag[:AuthTagSize])
+	return sessionID, nil
+}
+
+var realityMaskLabel = []byte("obsidian_reality_ts_mask_v1")
+
+func authTimestampMask(authKey, nonce []byte) uint64 {
+	mac := hmac.New(sha256.New, authKey)
+	mac.Write(realityMaskLabel)
+	mac.Write(nonce)
+	return binary.BigEndian.Uint64(mac.Sum(nil))
+}
+
+// ErrRealityNoServerHello means the TCP connection was up and the ClientHello went out, but no
+// TLS answer came back. Unlike a failed connect, this can be a server turning down the SessionID.
+var ErrRealityNoServerHello = errors.New("no reality server hello")
+
+// legacyProbeEvery is how often a client on the legacy format tries the masked one again, so
+// that an updated server moves its clients off the plain timestamp.
+const legacyProbeEvery = 8
+
+// RealityAuthSelector picks the SessionID format for a client that does not know how old its
+// server is. It starts with the masked format and stays with the one that works. Network
+// failures say nothing about the format and must not be reported to it, or phones on a bad
+// connection would drift to the format that is easier to detect.
+type RealityAuthSelector struct {
+	mu        sync.Mutex
+	legacy    bool
+	confirmed bool
+	rejects   int
+	sinceTry  int
+	probing   bool
+}
+
+// Legacy reports whether the next connection should use the old plain-timestamp format.
+func (s *RealityAuthSelector) Legacy() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.probing = false
+	if s.legacy && s.confirmed {
+		s.sinceTry++
+		if s.sinceTry >= legacyProbeEvery {
+			s.sinceTry = 0
+			s.probing = true
+			return false
+		}
+	}
+	return s.legacy
+}
+
+// Confirm records that the last connection got through the handshake.
+func (s *RealityAuthSelector) Confirm() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.probing {
+		s.legacy = false
+		s.probing = false
+	}
+	s.confirmed = true
+	s.rejects = 0
+}
+
+// Reject records that the server answered, or stayed silent after the ClientHello, in a way
+// that can mean it did not accept the SessionID. A rolled back server is noticed after a few
+// rejects in a row.
+func (s *RealityAuthSelector) Reject() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.probing {
+		s.probing = false
+		return
+	}
+	s.rejects++
+	if s.confirmed && s.rejects < 3 {
+		return
+	}
+	s.confirmed = false
+	s.rejects = 0
+	s.legacy = !s.legacy
+}
+
+// VerifySessionID validates a SessionID of either format against the pre-shared auth key, target
+// SNI, and timestamp freshness window. Both are accepted so that clients and servers can be
+// updated independently.
 func VerifySessionID(sessionID []byte, sni string, authKey []byte, windowSec int64) bool {
+	if verifyPlainSessionID(sessionID, sni, authKey, windowSec) {
+		return true
+	}
+	return verifyMaskedSessionID(sessionID, sni, authKey, windowSec)
+}
+
+func verifyMaskedSessionID(sessionID []byte, sni string, authKey []byte, windowSec int64) bool {
+	if len(sessionID) != TLSSessionIDSize || len(authKey) == 0 {
+		return false
+	}
+	if windowSec <= 0 {
+		windowSec = DefaultAuthWindowSec
+	}
+	expectedTag := computeAuthTag(authKey, sessionID[:AuthNonceSize+AuthTimestampSize], sni)
+	if subtle.ConstantTimeCompare(sessionID[AuthNonceSize+AuthTimestampSize:], expectedTag[:AuthTagSize]) != 1 {
+		return false
+	}
+	mask := authTimestampMask(authKey, sessionID[:AuthNonceSize])
+	ts := int64(binary.BigEndian.Uint64(sessionID[AuthNonceSize:AuthNonceSize+AuthTimestampSize]) ^ mask)
+	diff := time.Now().Unix() - ts
+	return diff >= -windowSec && diff <= windowSec
+}
+
+// verifyPlainSessionID performs constant-time validation of the plain-timestamp format.
+func verifyPlainSessionID(sessionID []byte, sni string, authKey []byte, windowSec int64) bool {
 	if len(sessionID) != TLSSessionIDSize {
 		return false
 	}

@@ -118,6 +118,9 @@ type Session struct {
 	netChangeCh chan struct{}
 	netChanged  atomic.Bool
 
+	// realityAuth picks the SessionID format this server understands.
+	realityAuth obsidian.RealityAuthSelector
+
 	// rejectLimiter bounds locally generated IPv6 rejects (see rejectIPv6).
 	rejectLimiter *obsidian.RejectLimiter
 }
@@ -404,6 +407,7 @@ func (s *Session) runConnection(tun io.ReadWriteCloser) error {
 		conn net.Conn
 		err  error
 	)
+	confirmHandshake := func() {}
 
 	// A signal that arrived while the previous connection was already ending is spent.
 	select {
@@ -442,7 +446,22 @@ func (s *Session) runConnection(tun io.ReadWriteCloser) error {
 		transportCfg.SNI = sni
 		transportCfg.RealityEnabled = true
 		transportCfg.RealityAuthKey = authKeyBytes
+		transportCfg.RealityLegacyAuth = s.realityAuth.Legacy()
 		conn, err = obsidian.DialObsidianREALITY(transportCfg)
+		if err == nil {
+			handshook := false
+			defer func() {
+				if !handshook {
+					s.realityAuth.Reject()
+				}
+			}()
+			confirmHandshake = func() {
+				handshook = true
+				s.realityAuth.Confirm()
+			}
+		} else if errors.Is(err, obsidian.ErrRealityNoServerHello) {
+			s.realityAuth.Reject()
+		}
 	} else if s.cfg.NoTLS {
 		conn, err = obsidian.DialTCPTimeoutWithConfig(transportCfg, 3*time.Second)
 	} else {
@@ -507,6 +526,7 @@ func (s *Session) runConnection(tun io.ReadWriteCloser) error {
 	if err != nil {
 		return fmt.Errorf("process server hello: %w", err)
 	}
+	confirmHandshake()
 	_ = conn.SetDeadline(time.Time{})
 
 	s.lastHandshake.Store(time.Now().Unix())
@@ -520,7 +540,15 @@ func (s *Session) runConnection(tun io.ReadWriteCloser) error {
 	if s.cfg.UDPPort != "" && s.cfg.EnableUDPData {
 		udpKeys := obsidian.DeriveUDPKeys(hs.SessionKeys, true)
 		udpRemote := net.JoinHostPort(s.cfg.ServerHost, s.cfg.UDPPort)
-		udpConn, err := obsidian.DialProtectedUDP("udp4", udpRemote, s.socketProtector)
+		var (
+			udpConn *net.UDPConn
+			hopAddr *net.UDPAddr
+		)
+		if len(s.cfg.PortPool) > 0 {
+			udpConn, hopAddr, err = obsidian.DialHoppingUDP("udp4", udpRemote, s.socketProtector)
+		} else {
+			udpConn, err = obsidian.DialProtectedUDP("udp4", udpRemote, s.socketProtector)
+		}
 		if err != nil {
 			return fmt.Errorf("dial udp: %w", err)
 		}
@@ -531,6 +559,7 @@ func (s *Session) runConnection(tun io.ReadWriteCloser) error {
 			return fmt.Errorf("udp channel: %w", err)
 		}
 		defer udpCh.Close()
+		udpCh.SwitchDestination(hopAddr)
 		udpCh.UseBucketPadding = s.tunnelCfg.UseBucketPadding
 		if s.tunnelCfg.BucketMTU > 0 {
 			udpCh.BucketMTU = s.tunnelCfg.BucketMTU
@@ -825,7 +854,9 @@ func warmupUDPAddress(ch *obsidian.UDPChannel) {
 }
 
 func setOptimalUDPBuffers(conn *net.UDPConn) {
-	sizes := []int{16 * 1024 * 1024, 8 * 1024 * 1024, 4 * 1024 * 1024, 2 * 1024 * 1024, 1024 * 1024, 512 * 1024, 256 * 1024}
+	// Embedders are mostly phones. A larger buffer only adds delay when the device falls behind:
+	// 16 MB at 100 Mbit/s is more than a second of queue.
+	sizes := []int{2 * 1024 * 1024, 1024 * 1024, 512 * 1024, 256 * 1024}
 	for _, sz := range sizes {
 		if err := conn.SetReadBuffer(sz); err == nil {
 			break

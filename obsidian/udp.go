@@ -1,6 +1,7 @@
 package obsidian
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/sha256"
@@ -319,13 +320,18 @@ func (ch *UDPChannel) writeProtected(buf []byte, n int) error {
 
 // SwitchDestination updates the active remote destination for cryptographic port hopping.
 func (ch *UDPChannel) SwitchDestination(addr *net.UDPAddr) {
-	if addr != nil {
+	if addr != nil && ch.conn.RemoteAddr() == nil {
 		ch.destAddr.Store(addr)
 	}
 }
 
-// SetRemotePort updates the active destination port while preserving the host IP.
+// SetRemotePort updates the active destination port while preserving the host IP. A connected
+// socket can only talk to the port it was dialed to, so it stays there: use DialHoppingUDP for
+// a channel that changes ports.
 func (ch *UDPChannel) SetRemotePort(port int) {
+	if ch.conn.RemoteAddr() != nil {
+		return
+	}
 	cur := ch.destAddr.Load()
 	if cur != nil {
 		newAddr := &net.UDPAddr{IP: cur.IP, Port: port, Zone: cur.Zone}
@@ -1014,6 +1020,36 @@ func (s *UDPSession) Close() {
 			close(s.done)
 		}
 	})
+}
+
+// DialHoppingUDP creates an unconnected *net.UDPConn for port hopping and resolves its first
+// destination, which the caller passes to SwitchDestination. Replies come back from whichever
+// port the client last used, so the socket cannot be connected to a single one.
+func DialHoppingUDP(network, remoteAddr string, protector SocketProtector) (*net.UDPConn, *net.UDPAddr, error) {
+	raddr, err := net.ResolveUDPAddr(network, remoteAddr)
+	if err != nil {
+		return nil, nil, err
+	}
+	var lc net.ListenConfig
+	if protector != nil {
+		lc.Control = func(_, _ string, c syscall.RawConn) error {
+			var protectErr error
+			if err := c.Control(func(fd uintptr) { protectErr = protector(int(fd)) }); err != nil {
+				return err
+			}
+			return protectErr
+		}
+	}
+	pc, err := lc.ListenPacket(context.Background(), network, ":0")
+	if err != nil {
+		return nil, nil, err
+	}
+	conn, ok := pc.(*net.UDPConn)
+	if !ok {
+		pc.Close()
+		return nil, nil, errors.New("expected *net.UDPConn from listen")
+	}
+	return conn, raddr, nil
 }
 
 // DialProtectedUDP creates a connected *net.UDPConn to the specified address.

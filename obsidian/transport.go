@@ -154,17 +154,19 @@ func GenerateSelfSignedCertificate(hosts ...string) (tls.Certificate, error) {
 type SocketProtector func(fd int) error
 
 type ClientTransportConfig struct {
-	ServerHost      string
-	ServerPort      string
-	SNI             string
-	SNIPool         []string
-	VerifyCert      bool
-	ServerPubPin    []byte // Optional SHA-256 pin of server certificate DER bytes
-	Fingerprint     *utls.ClientHelloID
-	RealityEnabled  bool
-	RealityAuthKey  []byte // Pre-shared authentication key for REALITY SessionID HMAC
-	SocketProtector SocketProtector
-	Dialer          *net.Dialer
+	ServerHost     string
+	ServerPort     string
+	SNI            string
+	SNIPool        []string
+	VerifyCert     bool
+	ServerPubPin   []byte // Optional SHA-256 pin of server certificate DER bytes
+	Fingerprint    *utls.ClientHelloID
+	RealityEnabled bool
+	RealityAuthKey []byte // Pre-shared authentication key for REALITY SessionID HMAC
+	// RealityLegacyAuth sends the plain-timestamp SessionID that older servers need.
+	RealityLegacyAuth bool
+	SocketProtector   SocketProtector
+	Dialer            *net.Dialer
 }
 
 func createClientDialer(cfg ClientTransportConfig, timeout time.Duration) *net.Dialer {
@@ -251,7 +253,11 @@ func DialObsidianREALITY(cfg ClientTransportConfig) (net.Conn, error) {
 		}
 	}
 
-	sessionID, err := GenerateSessionID(cfg.RealityAuthKey, sni)
+	generate := GenerateMaskedSessionID
+	if cfg.RealityLegacyAuth {
+		generate = GenerateSessionID
+	}
+	sessionID, err := generate(cfg.RealityAuthKey, sni)
 	if err != nil {
 		return nil, fmt.Errorf("generate reality session id: %w", err)
 	}
@@ -282,7 +288,7 @@ func DialObsidianREALITY(cfg ClientTransportConfig) (net.Conn, error) {
 	respHeader := make([]byte, 5)
 	if _, err := io.ReadFull(rawConn, respHeader); err != nil {
 		rawConn.Close()
-		return nil, fmt.Errorf("read reality server hello record header: %w", err)
+		return nil, fmt.Errorf("read reality server hello record header: %w: %w", ErrRealityNoServerHello, err)
 	}
 	if respHeader[0] != 0x16 && respHeader[0] != 0x14 {
 		rawConn.Close()
