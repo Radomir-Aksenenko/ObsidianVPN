@@ -311,8 +311,10 @@ func DialObsidianREALITY(cfg ClientTransportConfig) (net.Conn, error) {
 }
 
 // tcpNotSentLowat bounds the unsent bytes the kernel keeps per socket (see tuneTCPSocket).
-// 128 KiB covers a full window refill at several hundred Mbit/s without a write wakeup stall.
-const tcpNotSentLowat = 128 * 1024
+// Without it autotuning lets the unsent queue grow to wmem_max (4 MiB by default), which is
+// over half a second at 50 Mbit/s. 256 KiB is about 40 ms there, and in a netem test at 60 ms
+// RTT it matched the throughput of no limit, while 128 KiB sometimes lost up to 20%.
+const tcpNotSentLowat = 256 * 1024
 
 // setOptimalTCPConn disables Nagle and limits the unsent queue. It deliberately leaves
 // SO_RCVBUF and SO_SNDBUF alone: setting either one turns off window autotuning, and the kernel
