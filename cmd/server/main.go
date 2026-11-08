@@ -505,13 +505,8 @@ func handleClient(conn net.Conn, priv, pub [obsidian.KeySize]byte,
 				}
 				sent = n
 			}
-			for _, p := range packets[sent:] {
-				if err := tunnel.SendData(p); err != nil {
-					return sent, err
-				}
-				sent++
-			}
-			return sent, nil
+			n, err := tunnel.SendDataBatch(packets[sent:])
+			return sent + n, err
 		})
 		route.setIdentity(hs.ClientStaticPub())
 		defer route.Close()
@@ -529,6 +524,7 @@ func handleClient(conn net.Conn, priv, pub [obsidian.KeySize]byte,
 	} else {
 		log.Printf("session %s: TCP relay started", sessionID)
 		route := tunRoutes.registerSession(sessionID, tunnel.SendData)
+		route.setBatchSender(tunnel.SendDataBatch)
 		route.setIdentity(hs.ClientStaticPub())
 		defer route.Close()
 		tunnelToTUN(tunnel, newClientSink(route, cfg.EnableIPv6), sessionID)

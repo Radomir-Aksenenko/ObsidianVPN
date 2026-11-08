@@ -10,6 +10,7 @@ package obsidian
 //   - Настраиваемый S4 padding диапазон передаётся через TunnelConfig
 
 import (
+	"bufio"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -244,8 +245,13 @@ type tunnelPkt struct {
 
 type Tunnel struct {
 	conn   net.Conn
+	reader *bufio.Reader
 	framer *StreamFramer
 	jitter JitterProfile
+	// writeDeadlineAt is when the write deadline was last pushed forward, guarded by sendMu.
+	writeDeadlineAt time.Time
+	// batchBuf collects the frames of one SendDataBatch call, guarded by sendMu.
+	batchBuf []byte
 
 	dataIn       chan tunnelPkt
 	sendMu       sync.Mutex
@@ -267,6 +273,13 @@ type Tunnel struct {
 // limits local queueing delay: 256 x 1.3 KB is ~100 ms at 20 Mbps versus ~0.5 s at 1024.
 const tunnelDataQueueSize = 256
 
+// tunnelReadBufSize lets recvLoop take the length prefix and the frame body of several frames
+// from one read instead of two reads per frame.
+const tunnelReadBufSize = 32 * 1024
+
+// tunnelBatchLimit flushes a SendDataBatch buffer once it holds this much.
+const tunnelBatchLimit = 64 * 1024
+
 func NewTunnel(conn net.Conn, framer *StreamFramer, cfg TunnelConfig) *Tunnel {
 	ctx, cancel := context.WithCancel(context.Background())
 	now := time.Now()
@@ -285,6 +298,7 @@ func NewTunnel(conn net.Conn, framer *StreamFramer, cfg TunnelConfig) *Tunnel {
 	}
 	t := &Tunnel{
 		conn:        conn,
+		reader:      bufio.NewReaderSize(conn, tunnelReadBufSize),
 		framer:      framer,
 		jitter:      cfg.Jitter,
 		dataIn:      make(chan tunnelPkt, tunnelDataQueueSize),
@@ -314,6 +328,70 @@ func NewTunnel(conn net.Conn, framer *StreamFramer, cfg TunnelConfig) *Tunnel {
 func (t *Tunnel) SendData(payload []byte) error {
 	t.applyBurstJitter()
 	return t.writePacket(PacketData, payload)
+}
+
+// SendDataBatch frames each packet exactly as SendData does and writes the frames together,
+// so a burst costs one write instead of one per packet. The byte stream is the concatenation of
+// the same frames; only how the kernel cuts it into segments changes. It returns how many
+// packets were written.
+func (t *Tunnel) SendDataBatch(packets [][]byte) (int, error) {
+	if len(packets) == 0 {
+		return 0, nil
+	}
+	t.applyBurstJitter()
+	t.sendMu.Lock()
+	defer t.sendMu.Unlock()
+
+	buf := t.batchBuf[:0]
+	framed, sent := 0, 0
+	flush := func() error {
+		if len(buf) == 0 {
+			return nil
+		}
+		if err := t.writeFrameLocked(buf); err != nil {
+			t.cancel()
+			return err
+		}
+		sent = framed
+		buf = buf[:0]
+		return nil
+	}
+	defer func() { t.batchBuf = buf[:0] }()
+
+	for _, p := range packets {
+		if t.sessionExpired(t.packetCount.Add(1)) {
+			t.cancel()
+			if err := flush(); err != nil {
+				return sent, err
+			}
+			return sent, io.ErrClosedPipe
+		}
+		need := 4 + packetHeaderSize + len(p) + 256 + TagSize
+		if len(buf) > 0 && len(buf)+need > tunnelBatchLimit {
+			if err := flush(); err != nil {
+				return sent, err
+			}
+		}
+		if cap(buf)-len(buf) < need {
+			grown := make([]byte, len(buf), max(len(buf)+need, tunnelBatchLimit))
+			copy(grown, buf)
+			buf = grown
+		}
+		n, err := t.framer.FrameWithBuffer(buf[len(buf):len(buf)+need], PacketData, p)
+		if err != nil {
+			if ferr := flush(); ferr != nil {
+				return sent, ferr
+			}
+			return sent, err
+		}
+		buf = buf[:len(buf)+n]
+		framed++
+	}
+	if err := flush(); err != nil {
+		return sent, err
+	}
+	t.lastAuthNano.Store(time.Now().UnixNano())
+	return sent, nil
 }
 
 // applyBurstJitter delays the first DATA packet of a burst instead of every packet.
@@ -485,9 +563,15 @@ func (t *Tunnel) writePacket(ptype PacketType, payload []byte) error {
 }
 
 func (t *Tunnel) writeFrameLocked(frame []byte) error {
+	// The deadline only has to bound a stuck write, so it is pushed forward at most once a
+	// second rather than set and cleared around every frame. A write can therefore block for
+	// between tunnelWriteTimeout-1s and tunnelWriteTimeout before failing. Nothing else writes
+	// to conn once the tunnel exists, so the deadline left in place affects no one.
 	if tunnelWriteTimeout > 0 {
-		_ = t.conn.SetWriteDeadline(time.Now().Add(tunnelWriteTimeout))
-		defer t.conn.SetWriteDeadline(time.Time{}) //nolint:errcheck
+		if now := time.Now(); now.Sub(t.writeDeadlineAt) >= time.Second {
+			_ = t.conn.SetWriteDeadline(now.Add(tunnelWriteTimeout))
+			t.writeDeadlineAt = now
+		}
 	}
 	for len(frame) > 0 {
 		n, err := t.conn.Write(frame)
@@ -517,7 +601,7 @@ func (t *Tunnel) recvLoop() {
 		if t.sessionExpired(count) {
 			return
 		}
-		if _, err := io.ReadFull(t.conn, lenBuf); err != nil {
+		if _, err := io.ReadFull(t.reader, lenBuf); err != nil {
 			// EOF/net.ErrClosed is the normal result when the peer or local caller
 			// closes a completed tunnel.  Do not turn a successful probe shutdown
 			// into a misleading error line.
@@ -536,7 +620,7 @@ func (t *Tunnel) recvLoop() {
 
 		rawBuf := getFrameBuf(int(frameLen))
 		raw := *rawBuf
-		if _, err := io.ReadFull(t.conn, raw); err != nil {
+		if _, err := io.ReadFull(t.reader, raw); err != nil {
 			log.Printf("tunnel recv read frame len=%d failed: %v", frameLen, err)
 			putFrameBuf(rawBuf)
 			return

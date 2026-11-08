@@ -626,11 +626,11 @@ type UDPSession struct {
 	BucketMTU        int
 	MaxTrailer       int
 
-	sendMu    sync.RWMutex
-	recvMu    sync.Mutex
+	sendMu  sync.RWMutex
+	recvMu  sync.Mutex
+	batchMu sync.Mutex
 	// sendBuf is SendBatch's scratch space, guarded by batchMu.
 	sendBuf   []byte
-	batchMu   sync.Mutex
 	dataIn    chan []byte
 	done      chan struct{}
 	closeOnce sync.Once
