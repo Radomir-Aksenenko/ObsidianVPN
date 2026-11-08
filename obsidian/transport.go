@@ -35,6 +35,7 @@ import (
 	"math/big"
 	"math/rand/v2"
 	"net"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -309,18 +310,32 @@ func DialObsidianREALITY(cfg ClientTransportConfig) (net.Conn, error) {
 	return rawConn, nil
 }
 
+// tcpNotSentLowat bounds the unsent bytes the kernel keeps per socket (see tuneTCPSocket).
+// 128 KiB covers a full window refill at several hundred Mbit/s without a write wakeup stall.
+const tcpNotSentLowat = 128 * 1024
+
+// setOptimalTCPConn disables Nagle and limits the unsent queue. It deliberately leaves
+// SO_RCVBUF and SO_SNDBUF alone: setting either one turns off window autotuning, and the kernel
+// silently clamps the request to rmem_max/wmem_max (about 208 KiB on a stock VPS). That capped
+// the tunnel at roughly 29 Mbit/s at 60 ms RTT, against about 500 Mbit/s with autotuning.
 func setOptimalTCPConn(tc *net.TCPConn) {
-	tc.SetNoDelay(true)
-	sizes := []int{2 * 1024 * 1024, 1024 * 1024, 512 * 1024}
-	for _, sz := range sizes {
-		if err := tc.SetReadBuffer(sz); err == nil {
-			break
-		}
-	}
-	for _, sz := range sizes {
-		if err := tc.SetWriteBuffer(sz); err == nil {
-			break
-		}
+	_ = tc.SetNoDelay(true)
+	tuneTCPSocket(tc)
+}
+
+var serverTCPCongestion atomic.Pointer[string]
+
+// SetServerTCPCongestion makes every TCP connection the server accepts use the named congestion
+// control (for example "bbr"), when the kernel offers it. An empty name keeps the system default.
+// BBR does not treat random loss as congestion, which matters on lossy or policed mobile paths.
+// Only the sender side matters, so this affects the download direction.
+func SetServerTCPCongestion(name string) {
+	serverTCPCongestion.Store(&name)
+}
+
+func applyServerTCPCongestion(tc *net.TCPConn) {
+	if name := serverTCPCongestion.Load(); name != nil && *name != "" {
+		setTCPCongestion(tc, *name)
 	}
 }
 
@@ -555,6 +570,7 @@ func (l *noDelayListener) Accept() (net.Conn, error) {
 	}
 	if tc, ok := conn.(*net.TCPConn); ok {
 		setOptimalTCPConn(tc)
+		applyServerTCPCongestion(tc)
 	}
 	return conn, nil
 }

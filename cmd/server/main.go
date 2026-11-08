@@ -64,6 +64,7 @@ type Config struct {
 	EnableCookieChallenge bool     `json:"enable_cookie_challenge,omitempty"`
 	CookieSecret          string   `json:"cookie_secret,omitempty"`
 	UDPSocketBufferMB     int      `json:"udp_socket_buffer_mb"`
+	TCPCongestion         string   `json:"tcp_congestion,omitempty"`
 	MaxTrailer            int      `json:"max_trailer,omitempty"`
 	UseBucketPadding      bool     `json:"use_bucket_padding,omitempty"`
 	BucketMTU             int      `json:"bucket_mtu,omitempty"`
@@ -86,10 +87,38 @@ var (
 )
 
 const (
-	defaultUDPSocketBufferMB = 16
-	minUDPSocketBufferMB     = 4
+	// 4 MiB holds about 30 ms of traffic at 1 Gbit/s: enough to ride out a scheduling hiccup
+	// without dropping, small enough not to become a standing queue that game packets wait in.
+	defaultUDPSocketBufferMB = 4
+	minUDPSocketBufferMB     = 1
 	maxUDPSocketBufferMB     = 64
+
+	defaultTCPCongestion = "bbr"
 )
+
+// tcpCongestion returns the congestion control for accepted TCP connections, or "" for the
+// system default ("system" or "default" in the config).
+func tcpCongestion(cfg Config) string {
+	switch name := strings.ToLower(strings.TrimSpace(cfg.TCPCongestion)); name {
+	case "":
+		return defaultTCPCongestion
+	case "system", "default", "off":
+		return ""
+	default:
+		return name
+	}
+}
+
+// setUDPBuffers applies the configured buffer size and logs what the kernel actually granted.
+// Linux reports twice the requested value; anything less means rmem_max/wmem_max won.
+func setUDPBuffers(conn *net.UDPConn, size int, label string) {
+	rcv, snd, err := obsidian.SetUDPSocketBuffers(conn, size)
+	if err != nil {
+		log.Printf("%s: udp buffers %d bytes: %v", label, size, err)
+		return
+	}
+	log.Printf("%s: udp buffers requested %d KiB, kernel reports read=%d KiB write=%d KiB", label, size/1024, rcv/1024, snd/1024)
+}
 
 func udpSocketBufferBytes(cfg Config) int {
 	mb := cfg.UDPSocketBufferMB
@@ -227,13 +256,7 @@ func main() {
 			log.Fatal("udp listen:", err)
 		}
 		udpBuf := udpSocketBufferBytes(cfg)
-		if err := udpConn.SetReadBuffer(udpBuf); err != nil {
-			log.Printf("udp read buffer %d bytes: %v", udpBuf, err)
-		}
-		if err := udpConn.SetWriteBuffer(udpBuf); err != nil {
-			log.Printf("udp write buffer %d bytes: %v", udpBuf, err)
-		}
-		log.Printf("UDP socket buffers requested: read=%d MiB write=%d MiB", udpBuf/(1024*1024), udpBuf/(1024*1024))
+		setUDPBuffers(udpConn, udpBuf, "udp :"+cfg.UDPPort)
 		udpMux = obsidian.NewUDPMux(udpConn)
 
 		// Register additional ports from PortPool for cryptographic port hopping
@@ -251,8 +274,7 @@ func main() {
 				log.Printf("listen extra udp port %d: %v", extraPort, err)
 				continue
 			}
-			_ = extraConn.SetReadBuffer(udpBuf)
-			_ = extraConn.SetWriteBuffer(udpBuf)
+			setUDPBuffers(extraConn, udpBuf, fmt.Sprintf("udp :%d", extraPort))
 			udpMux.AddListener(extraConn)
 			log.Printf("UDP data channel extra port listening on %s:%d", cfg.Host, extraPort)
 		}
@@ -283,6 +305,8 @@ func main() {
 	} else {
 		realityAuthKey = serverPub[:]
 	}
+
+	obsidian.SetServerTCPCongestion(tcpCongestion(cfg))
 
 	var listener net.Listener
 	if realityTarget != "" {
