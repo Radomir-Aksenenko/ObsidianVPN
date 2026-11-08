@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/binary"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -229,4 +230,51 @@ func TestRoutedSessionBulkNotStarvedByLatencyLane(t *testing.T) {
 		}
 	}
 	t.Fatalf("no bulk packet was sent after the held one: %v", got)
+}
+
+// With a batch sender, queued bulk packets leave in one call, stale ones are dropped first,
+// and a waiting latency-sensitive packet goes out before the batch.
+func TestRoutedSessionBatchedBulk(t *testing.T) {
+	var events []string
+	s := &routedSession{
+		sid: "batch",
+		send: func(p []byte) error {
+			events = append(events, "one:"+string(p))
+			return nil
+		},
+		out:  make(chan routedPacket, 8),
+		prio: make(chan routedPacket, 8),
+		done: make(chan struct{}),
+	}
+	s.setBatchSender(func(pkts [][]byte) (int, error) {
+		names := make([]string, len(pkts))
+		for i, p := range pkts {
+			names[i] = string(p)
+		}
+		events = append(events, "batch:"+strings.Join(names, ","))
+		return len(pkts), nil
+	})
+	pkt := func(name string, age time.Duration) routedPacket {
+		b := getRoutedPacket(len(name))
+		copy(b, name)
+		return routedPacket{buf: b, at: time.Now().Add(-age)}
+	}
+	s.prio <- pkt("P", 0)
+	first := pkt("b1", 0)
+	s.out <- pkt("old", time.Second)
+	s.out <- pkt("b2", 0)
+	s.out <- pkt("b3", 0)
+
+	var batch [routedBatchSize]routedPacket
+	s.sendBulk(first, batch[:])
+
+	want := []string{"one:P", "batch:b1,b2,b3"}
+	if !slices.Equal(events, want) {
+		t.Fatalf("events = %q, want %q", events, want)
+	}
+	for i, p := range batch {
+		if p.buf != nil {
+			t.Fatalf("batch slot %d still holds a buffer", i)
+		}
+	}
 }

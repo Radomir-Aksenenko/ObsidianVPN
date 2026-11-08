@@ -10,6 +10,7 @@ import (
 	"io"
 	mathrand "math/rand/v2"
 	"net"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -51,7 +52,7 @@ const (
 
 var udpSendBufPool = sync.Pool{
 	New: func() any {
-		b := make([]byte, 2048)
+		b := make([]byte, 2560)
 		return &b
 	},
 }
@@ -183,10 +184,34 @@ func udpNonce(counter uint64) [NonceSize]byte {
 // sample must be 16 bytes (first 16 bytes of ciphertext).
 func protectCounter(hp cipher.Block, counterBuf, sample []byte) {
 	var mask [16]byte
-	hp.Encrypt(mask[:], sample)
+	protectCounterWith(hp, counterBuf, sample, mask[:])
+}
+
+// protectCounterWith is protectCounter with caller-owned space for the mask. Arrays handed to
+// the cipher interfaces escape to the heap, so the hot paths keep this scratch in memory they
+// already own instead of allocating it for every datagram.
+func protectCounterWith(hp cipher.Block, counterBuf, sample, mask []byte) {
+	hp.Encrypt(mask[:16], sample)
 	for i := 0; i < UDPCounterSize; i++ {
 		counterBuf[i] ^= mask[i]
 	}
+}
+
+// udpScratchLen is the scratch one seal or open uses: nonce, counter mask, AAD and counter.
+const udpScratchLen = NonceSize + 16 + UDPHeaderSize + UDPCounterSize
+
+// udpScratch splits a udpScratchLen buffer into its parts.
+func udpScratch(b []byte) (nonce, mask, aad, ctr []byte) {
+	b = b[:udpScratchLen]
+	return b[:NonceSize], b[NonceSize : NonceSize+16], b[NonceSize+16 : NonceSize+16+UDPHeaderSize], b[NonceSize+16+UDPHeaderSize:]
+}
+
+// putUDPNonce writes the nonce for counter into dst (NonceSize bytes) and returns it.
+func putUDPNonce(dst []byte, counter uint64) []byte {
+	n := dst[:NonceSize]
+	clear(n[:NonceSize-8])
+	binary.BigEndian.PutUint64(n[NonceSize-8:], counter)
+	return n
 }
 
 // ── Sharded Session Table for O(1) UDP Routing ──────────────────────────────
@@ -603,7 +628,9 @@ type UDPSession struct {
 
 	sendMu    sync.RWMutex
 	recvMu    sync.Mutex
+	// sendBuf is SendBatch's scratch space, guarded by batchMu.
 	sendBuf   []byte
+	batchMu   sync.Mutex
 	dataIn    chan []byte
 	done      chan struct{}
 	closeOnce sync.Once
@@ -761,9 +788,10 @@ func (m *UDPMux) Run() {
 
 func (m *UDPMux) runOnConn(conn *net.UDPConn) {
 	buf := make([]byte, udpBufSize)
+	nonceBuf, mask, aad, ctrBuf := udpScratch(make([]byte, udpScratchLen))
 
 	for {
-		n, addr, err := conn.ReadFromUDP(buf[:])
+		n, addr, err := conn.ReadFromUDPAddrPort(buf[:])
 		if err != nil {
 			return
 		}
@@ -830,19 +858,17 @@ func (m *UDPMux) runOnConn(conn *net.UDPConn) {
 		}
 
 		// 3. Unmask counter: XOR 8-byte counter with AES(ciphertext sample)
-		var ctrBuf [UDPCounterSize]byte
-		copy(ctrBuf[:], packetData[UDPTagSize:UDPHeaderSize])
-		protectCounter(hp, ctrBuf[:], sample)
-		ctr := binary.BigEndian.Uint64(ctrBuf[:])
+		copy(ctrBuf, packetData[UDPTagSize:UDPHeaderSize])
+		protectCounterWith(hp, ctrBuf, sample, mask)
+		ctr := binary.BigEndian.Uint64(ctrBuf)
 
 		// 4. Decrypt with AAD = plaintext header (tag || ctrBuf)
-		var aad [UDPHeaderSize]byte
 		copy(aad[:UDPTagSize], tag[:])
-		copy(aad[UDPTagSize:], ctrBuf[:])
+		copy(aad[UDPTagSize:], ctrBuf)
 
-		nonce := udpNonce(ctr)
+		nonce := putUDPNonce(nonceBuf, ctr)
 		pkt := getPkt(len(packetData) - UDPHeaderSize)
-		plain, err := dec.Open(pkt[:0], nonce[:], packetData[UDPHeaderSize:], aad[:])
+		plain, err := dec.Open(pkt[:0], nonce, packetData[UDPHeaderSize:], aad)
 		if err != nil {
 			PutPacket(pkt)
 			continue
@@ -855,8 +881,7 @@ func (m *UDPMux) runOnConn(conn *net.UDPConn) {
 		}
 
 		// 6. Seamless NAT Rebinding / Roaming update
-		foundSess.clientAddr.Store(addr)
-		foundSess.activeConn.Store(conn)
+		foundSess.noteClientAddr(addr, conn)
 
 		// 7. Unframe Bucket Padding length if enabled
 		actual := plain
@@ -882,6 +907,22 @@ func (m *UDPMux) runOnConn(conn *net.UDPConn) {
 	}
 }
 
+// noteClientAddr records where the last authenticated datagram came from. The address only
+// changes on NAT rebinding or roaming, so it is stored (and allocated) only then.
+func (s *UDPSession) noteClientAddr(ap netip.AddrPort, conn *net.UDPConn) {
+	ap = unmapAddrPort(ap)
+	if cur := s.clientAddr.Load(); cur == nil || unmapAddrPort(cur.AddrPort()) != ap {
+		s.clientAddr.Store(net.UDPAddrFromAddrPort(ap))
+	}
+	if s.activeConn.Load() != conn {
+		s.activeConn.Store(conn)
+	}
+}
+
+func unmapAddrPort(ap netip.AddrPort) netip.AddrPort {
+	return netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
+}
+
 // Send encrypts payload, protects counter, sends to client via active socket.
 func (s *UDPSession) Send(payload []byte) error {
 	select {
@@ -895,6 +936,33 @@ func (s *UDPSession) Send(payload []byte) error {
 		return ErrUDPClientAddrUnknown
 	}
 
+	pBuf := getUDPSendBuf(maxSessionDatagram(len(payload)))
+	defer putUDPSendBuf(pBuf)
+	s.sendMu.RLock()
+	n := s.sealDatagram(*pBuf, payload)
+	s.sendMu.RUnlock()
+	_, err := s.outConn().WriteToUDP((*pBuf)[:n], addr)
+	return err
+}
+
+// maxSessionDatagram is the buffer sealDatagram needs for a payload: the largest datagram
+// (bucket padding only applies while the padded plaintext fits a 2048-byte buffer) plus the
+// crypto scratch it keeps at the end of the buffer.
+func maxSessionDatagram(payloadLen int) int {
+	return STUNHeaderSize + UDPHeaderSize + max(payloadLen, 2048) + TagSize + udpScratchLen
+}
+
+func (s *UDPSession) outConn() *net.UDPConn {
+	if c := s.activeConn.Load(); c != nil {
+		return c
+	}
+	return s.mux.conn
+}
+
+// sealDatagram writes the complete datagram for payload into buf, exactly as it goes on the
+// wire, and returns its length. The caller holds s.sendMu for reading and sizes buf with
+// maxSessionDatagram.
+func (s *UDPSession) sealDatagram(buf, payload []byte) int {
 	ctr := s.sendCtr.Add(1) - 1
 
 	plainPayload := payload
@@ -921,36 +989,135 @@ func (s *UDPSession) Send(payload []byte) error {
 		headerOffset = STUNHeaderSize
 	}
 
-	needed := headerOffset + UDPHeaderSize + len(plainPayload) + TagSize + 64
-	pBuf := getUDPSendBuf(needed)
-	defer putUDPSendBuf(pBuf)
-	buf := *pBuf
-
 	// 1. Plaintext header (RouteTag 4B + Counter 8B)
 	copy(buf[headerOffset:headerOffset+UDPTagSize], s.tag[:])
 	binary.BigEndian.PutUint64(buf[headerOffset+UDPTagSize:headerOffset+UDPHeaderSize], ctr)
 
+	// The datagram never reaches the last udpScratchLen bytes of buf (see maxSessionDatagram).
+	nonceBuf, mask, _, _ := udpScratch(buf[len(buf)-udpScratchLen:])
+
 	// 2. Encrypt with AAD = plaintext header
-	nonce := udpNonce(ctr)
-	sealed := s.encAEAD.Seal(buf[headerOffset+UDPHeaderSize:headerOffset+UDPHeaderSize], nonce[:], plainPayload, buf[headerOffset:headerOffset+UDPHeaderSize])
+	nonce := putUDPNonce(nonceBuf, ctr)
+	sealed := s.encAEAD.Seal(buf[headerOffset+UDPHeaderSize:headerOffset+UDPHeaderSize], nonce, plainPayload, buf[headerOffset:headerOffset+UDPHeaderSize])
 
 	// 3. Counter protection: XOR counter with AES(ciphertext sample)
-	protectCounter(s.hp, buf[headerOffset+UDPTagSize:headerOffset+UDPHeaderSize], buf[headerOffset+UDPHeaderSize:headerOffset+UDPHeaderSize+16])
-
-	outConn := s.activeConn.Load()
-	if outConn == nil {
-		outConn = s.mux.conn
-	}
+	protectCounterWith(s.hp, buf[headerOffset+UDPTagSize:headerOffset+UDPHeaderSize], buf[headerOffset+UDPHeaderSize:headerOffset+UDPHeaderSize+16], mask)
 
 	if s.EnableSTUN {
 		bodyLen := uint16(UDPHeaderSize + len(sealed))
 		writeSTUNHeader(buf[:STUNHeaderSize], bodyLen, 0x0101) // STUN Binding Success Response
-		_, err := outConn.WriteToUDP(buf[:STUNHeaderSize+int(bodyLen)], addr)
-		return err
+		return STUNHeaderSize + int(bodyLen)
+	}
+	return UDPHeaderSize + len(sealed)
+}
+
+const (
+	// gsoMaxSegments and gsoMaxBytes keep one UDP_SEGMENT send inside the kernel limits
+	// (64 segments, 64 KiB of UDP payload) with room to spare.
+	gsoMaxSegments = 64
+	gsoMaxBytes    = 60000
+	udpBatchBufLen = 64 * 1024
+)
+
+// SendBatch sends payloads in order as exactly the datagrams Send would produce. Where the
+// kernel supports UDP GSO, each run of equal-size datagrams (the last one may be shorter) goes
+// down in one sendmsg and the kernel cuts it back into separate datagrams, so the wire and the
+// client see no difference. It returns how many payloads were handed to the kernel.
+func (s *UDPSession) SendBatch(payloads [][]byte) (int, error) {
+	select {
+	case <-s.done:
+		return 0, io.ErrClosedPipe
+	default:
+	}
+	addr := s.clientAddr.Load()
+	if addr == nil {
+		return 0, ErrUDPClientAddrUnknown
+	}
+	conn := s.outConn()
+	if len(payloads) < 2 || !gsoAvailable(conn) {
+		for i, p := range payloads {
+			if err := s.Send(p); err != nil {
+				return i, err
+			}
+		}
+		return len(payloads), nil
 	}
 
-	_, err := outConn.WriteToUDP(buf[:UDPHeaderSize+len(sealed)], addr)
-	return err
+	s.batchMu.Lock()
+	defer s.batchMu.Unlock()
+	if len(s.sendBuf) < udpBatchBufLen {
+		s.sendBuf = make([]byte, udpBatchBufLen)
+	}
+	buf := s.sendBuf
+
+	var off, groupStart, segSize, segs, sent int
+	short := false
+	flush := func() error {
+		if segs == 0 {
+			return nil
+		}
+		if err := writeSegments(conn, buf[groupStart:off], segSize, addr); err != nil {
+			return err
+		}
+		sent += segs
+		groupStart, segs = off, 0
+		return nil
+	}
+
+	s.sendMu.RLock()
+	defer s.sendMu.RUnlock()
+	for _, p := range payloads {
+		need := maxSessionDatagram(len(p))
+		if need > len(buf) {
+			// Larger than any tunnel MTU; send it on its own rather than grow the buffer.
+			if err := flush(); err != nil {
+				return sent, err
+			}
+			off, groupStart = 0, 0
+			one := make([]byte, need)
+			n := s.sealDatagram(one, p)
+			if _, err := conn.WriteToUDP(one[:n], addr); err != nil {
+				return sent, err
+			}
+			sent++
+			continue
+		}
+		if len(buf)-off < need {
+			if err := flush(); err != nil {
+				return sent, err
+			}
+			off, groupStart = 0, 0
+		}
+		n := s.sealDatagram(buf[off:], p)
+		if segs > 0 && (n > segSize || short || segs >= gsoMaxSegments || off+n-groupStart > gsoMaxBytes) {
+			if err := flush(); err != nil {
+				return sent, err
+			}
+		}
+		if segs == 0 {
+			segSize, short = n, false
+		} else if n < segSize {
+			short = true
+		}
+		off += n
+		segs++
+	}
+	if err := flush(); err != nil {
+		return sent, err
+	}
+	return sent, nil
+}
+
+// writeEach sends b as consecutive datagrams of segSize bytes (the last may be shorter).
+func writeEach(conn *net.UDPConn, b []byte, segSize int, addr *net.UDPAddr) error {
+	for len(b) > 0 {
+		n := min(segSize, len(b))
+		if _, err := conn.WriteToUDP(b[:n], addr); err != nil {
+			return err
+		}
+		b = b[n:]
+	}
+	return nil
 }
 
 // Recv blocks until a decrypted data packet is available.

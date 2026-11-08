@@ -68,6 +68,11 @@ type routedSession struct {
 	router *tunRouter
 	sid    string
 	send   func([]byte) error
+	// sendBatch, when set, sends several bulk packets in one go (UDP GSO). It returns how many
+	// it handed to the kernel. Set after registration, so it is read atomically.
+	sendBatch atomic.Pointer[batchSendFunc]
+	// batchBufs is writeLoop's scratch list for sendBatch.
+	batchBufs [routedBatchSize][]byte
 
 	// mtu is the largest downlink packet this client accepts.
 	mtu atomic.Int32
@@ -306,8 +311,18 @@ func (s *routedSession) enqueue(packet []byte) bool {
 	}
 }
 
+type batchSendFunc func(packets [][]byte) (int, error)
+
+// routedBatchSize is how many already-queued bulk packets one writeLoop turn takes.
+const routedBatchSize = 32
+
+// setBatchSender enables batched bulk sends for this session.
+func (s *routedSession) setBatchSender(f batchSendFunc) {
+	s.sendBatch.Store(&f)
+}
+
 func (s *routedSession) writeLoop() {
-	var batch [32]routedPacket
+	var batch [routedBatchSize]routedPacket
 	for {
 		// Bulk turn: after routedPrioBurst latency-sensitive sends in a row, a waiting bulk
 		// packet goes out even if more of them are queued.
@@ -334,9 +349,15 @@ func (s *routedSession) writeLoop() {
 
 // sendBulk sends first and the bulk packets already queued behind it (up to len(batch)).
 // Waiting latency-sensitive packets go out before each one, so a full batch cannot hold them up.
+// With a batch sender the bulk packets leave together in one system call instead, and the
+// latency-sensitive ones go out right before and right after it.
 func (s *routedSession) sendBulk(first routedPacket, batch []routedPacket) {
 	batch[0] = first
 	n := 1 + takeQueued(s.out, batch[1:])
+	if f := s.sendBatch.Load(); f != nil && n > 1 {
+		s.sendBatched(*f, batch[:n])
+		return
+	}
 	for i := 0; i < n; i++ {
 		s.sendPrioWaiting()
 		p := batch[i]
@@ -344,6 +365,38 @@ func (s *routedSession) sendBulk(first routedPacket, batch []routedPacket) {
 		s.prioRun = 0
 		s.sendOne(p, time.Now())
 	}
+}
+
+func (s *routedSession) sendBatched(send batchSendFunc, batch []routedPacket) {
+	s.sendPrioWaiting()
+	s.prioRun = 0
+	now := time.Now()
+	bufs := s.batchBufs[:0]
+	for i := range batch {
+		p := batch[i]
+		if now.Sub(p.at) > routedMaxSojourn {
+			if dropLog.Ready() {
+				log.Printf("session %s: dropping stale downlink packet (queued %v)", s.sid, now.Sub(p.at).Round(time.Millisecond))
+			}
+			putRoutedPacket(p.buf)
+			batch[i] = routedPacket{}
+			continue
+		}
+		bufs = append(bufs, p.buf)
+	}
+	if len(bufs) > 0 {
+		if sent, err := send(bufs); err != nil && dropLog.Ready() {
+			log.Printf("session %s: batch send to client dropped %d of %d packets: %v", s.sid, len(bufs)-sent, len(bufs), err)
+		}
+	}
+	clear(bufs)
+	for i := range batch {
+		if batch[i].buf != nil {
+			putRoutedPacket(batch[i].buf)
+		}
+		batch[i] = routedPacket{}
+	}
+	s.sendPrioWaiting()
 }
 
 // sendPrioWaiting sends the latency-sensitive packets already queued, stopping after

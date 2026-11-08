@@ -472,16 +472,17 @@ func handleClient(conn net.Conn, priv, pub [obsidian.KeySize]byte,
 		var lastUDPRecv atomic.Int64
 		var lastTCPRecv atomic.Int64
 
-		route := tunRoutes.registerSession(sessionID, func(packet []byte) error {
+		// Downlink goes over UDP unless only TCP has carried client traffic for 2 s.
+		preferTCP := func() bool {
 			lastT := lastTCPRecv.Load()
 			lastU := lastUDPRecv.Load()
-			preferTCP := false
 			if lastT > lastU && lastT > 0 {
-				now := time.Now().UnixNano()
-				preferTCP = (now - lastU) > 2*time.Second.Nanoseconds()
+				return time.Now().UnixNano()-lastU > 2*time.Second.Nanoseconds()
 			}
-
-			if !preferTCP {
+			return false
+		}
+		route := tunRoutes.registerSession(sessionID, func(packet []byte) error {
+			if !preferTCP() {
 				err := sess.Send(packet)
 				if err == nil {
 					return nil
@@ -491,6 +492,26 @@ func handleClient(conn net.Conn, priv, pub [obsidian.KeySize]byte,
 				}
 			}
 			return tunnel.SendData(packet)
+		})
+		route.setBatchSender(func(packets [][]byte) (int, error) {
+			sent := 0
+			if !preferTCP() {
+				n, err := sess.SendBatch(packets)
+				if err == nil {
+					return n, nil
+				}
+				if !errors.Is(err, obsidian.ErrUDPClientAddrUnknown) {
+					return n, err
+				}
+				sent = n
+			}
+			for _, p := range packets[sent:] {
+				if err := tunnel.SendData(p); err != nil {
+					return sent, err
+				}
+				sent++
+			}
+			return sent, nil
 		})
 		route.setIdentity(hs.ClientStaticPub())
 		defer route.Close()
