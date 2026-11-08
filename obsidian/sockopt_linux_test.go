@@ -78,3 +78,26 @@ func TestSetUDPSocketBuffersReportsKernelSize(t *testing.T) {
 	}
 	t.Logf("requested 1 MiB, kernel reports rcv=%d snd=%d", rcv, snd)
 }
+
+// The effective congestion control is read back, so a missing module shows up in the log.
+func TestSetTCPCongestionReportsEffective(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		if c, err := ln.Accept(); err == nil {
+			c.Close()
+		}
+	}()
+	c, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if got := setTCPCongestion(c.(*net.TCPConn), "no-such-cc"); got == "" || got == "no-such-cc" {
+		t.Fatalf("effective congestion control = %q", got)
+	}
+	t.Logf("bbr -> %s", setTCPCongestion(c.(*net.TCPConn), "bbr"))
+}

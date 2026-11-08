@@ -32,9 +32,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math/big"
 	"math/rand/v2"
 	"net"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -325,7 +327,10 @@ func setOptimalTCPConn(tc *net.TCPConn) {
 	tuneTCPSocket(tc)
 }
 
-var serverTCPCongestion atomic.Pointer[string]
+var (
+	serverTCPCongestion atomic.Pointer[string]
+	congestionLogOnce   sync.Once
+)
 
 // SetServerTCPCongestion makes every TCP connection the server accepts use the named congestion
 // control (for example "bbr"), when the kernel offers it. An empty name keeps the system default.
@@ -337,7 +342,12 @@ func SetServerTCPCongestion(name string) {
 
 func applyServerTCPCongestion(tc *net.TCPConn) {
 	if name := serverTCPCongestion.Load(); name != nil && *name != "" {
-		setTCPCongestion(tc, *name)
+		got := setTCPCongestion(tc, *name)
+		congestionLogOnce.Do(func() {
+			if got != "" {
+				log.Printf("tcp congestion control: requested %s, connections use %s", *name, got)
+			}
+		})
 	}
 }
 

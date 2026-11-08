@@ -4,7 +4,7 @@ package obsidian
 
 import "net"
 
-func setTCPCongestion(*net.TCPConn, string) {}
+func setTCPCongestion(*net.TCPConn, string) string { return "" }
 
 // SetUDPSocketBuffers requests size bytes for both socket buffers. There is no forced variant
 // outside Linux; the returned sizes are the requested ones, not what the kernel granted.

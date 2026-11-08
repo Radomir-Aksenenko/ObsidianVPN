@@ -21,16 +21,20 @@ func tuneTCPSocket(tc *net.TCPConn) {
 	})
 }
 
-// setTCPCongestion switches one socket to the named congestion control. It needs the module to be
-// available; with CAP_NET_ADMIN the kernel loads it on demand. Failure leaves the system default.
-func setTCPCongestion(tc *net.TCPConn, name string) {
+// setTCPCongestion switches one socket to the named congestion control and returns the one the
+// socket ends up with. It needs the module to be available; with CAP_NET_ADMIN the kernel loads
+// it on demand. Failure leaves the system default.
+func setTCPCongestion(tc *net.TCPConn, name string) string {
 	rc, err := tc.SyscallConn()
 	if err != nil {
-		return
+		return ""
 	}
+	var got string
 	_ = rc.Control(func(fd uintptr) {
 		_ = unix.SetsockoptString(int(fd), unix.IPPROTO_TCP, unix.TCP_CONGESTION, name)
+		got, _ = unix.GetsockoptString(int(fd), unix.IPPROTO_TCP, unix.TCP_CONGESTION)
 	})
+	return got
 }
 
 // SetUDPSocketBuffers sets both socket buffers to size bytes. Plain SO_RCVBUF is silently

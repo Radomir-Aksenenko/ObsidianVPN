@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-func newTunnelPair(t *testing.T) (client, server *Tunnel) {
+func newTunnelPair(t *testing.T, tweak func(*TunnelConfig)) (client, server *Tunnel) {
 	t.Helper()
 	keyC, ivC := [KeySize]byte{1}, [NonceSize]byte{2}
 	keyS, ivS := [KeySize]byte{3}, [NonceSize]byte{4}
@@ -24,6 +24,9 @@ func newTunnelPair(t *testing.T) (client, server *Tunnel) {
 	cfg.Jitter = JitterOff
 	cfg.NoiseMinInterval, cfg.NoiseMaxInterval = time.Hour, time.Hour
 	cfg.KeepaliveInterval, cfg.KeepaliveJitter = time.Hour, 0
+	if tweak != nil {
+		tweak(&cfg)
+	}
 	client = NewTunnel(cliConn, NewStreamFramer(mk(keyC, ivC), mk(keyS, ivS)), cfg)
 	server = NewTunnel(srvConn, NewStreamFramer(mk(keyS, ivS), mk(keyC, ivC)), cfg)
 	t.Cleanup(func() { client.Close(); server.Close() })
@@ -33,7 +36,17 @@ func newTunnelPair(t *testing.T) (client, server *Tunnel) {
 // A batch must arrive as the same packets, in order, mixed with single sends, including a
 // batch larger than tunnelBatchLimit that is flushed in several writes.
 func TestTunnelSendDataBatchRoundTrip(t *testing.T) {
-	client, server := newTunnelPair(t)
+	t.Run("default", func(t *testing.T) { testTunnelBatch(t, nil) })
+	t.Run("bucket padding", func(t *testing.T) {
+		testTunnelBatch(t, func(c *TunnelConfig) {
+			c.UseBucketPadding, c.BucketMTU, c.MaxTrailer = true, 1360, 64
+			c.DataPadMin, c.DataPadMax = 0, 255
+		})
+	})
+}
+
+func testTunnelBatch(t *testing.T, tweak func(*TunnelConfig)) {
+	client, server := newTunnelPair(t, tweak)
 
 	var want [][]byte
 	var batches [][][]byte
