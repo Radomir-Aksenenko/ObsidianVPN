@@ -264,6 +264,9 @@ func DialObsidianREALITY(cfg ClientTransportConfig) (net.Conn, error) {
 	if cfg.RealityLegacyAuth {
 		mode = RealityAuthLegacy
 	}
+	if mode == RealityAuthRecords && len(cfg.RealityAuthKey) < 16 {
+		return nil, errors.New("record mode requires a secret reality_auth_key of at least 16 bytes")
+	}
 	generate := GenerateRecordSessionID
 	switch mode {
 	case RealityAuthMasked:
@@ -301,16 +304,22 @@ func DialObsidianREALITY(cfg ClientTransportConfig) (net.Conn, error) {
 		// Wait for the server flight like a browser does, then answer with CCS and Finished.
 		// The rest of the flight reaches the tunnel, whose hello scan skips it.
 		_ = rawConn.SetReadDeadline(time.Now().Add(5 * time.Second))
-		if err := awaitServerFlight(rawConn); err != nil {
+		finishedSize, err := awaitServerFlight(rawConn)
+		if err != nil {
 			rawConn.Close()
 			return nil, err
 		}
 		_ = rawConn.SetReadDeadline(time.Time{})
-		if _, err := rawConn.Write(clientFinishRecords()); err != nil {
+		if _, err := rawConn.Write(clientFinishRecords(finishedSize)); err != nil {
 			rawConn.Close()
 			return nil, fmt.Errorf("send reality finished: %w", err)
 		}
-		return newTLSRecordConn(rawConn), nil
+		protected, err := newRealityRecordConn(rawConn, cfg.RealityAuthKey, sessionID[:], true)
+		if err != nil {
+			rawConn.Close()
+			return nil, err
+		}
+		return protected, nil
 	}
 
 	// Complete legitimate TLS 1.3 handshake state machine by reading ServerHello

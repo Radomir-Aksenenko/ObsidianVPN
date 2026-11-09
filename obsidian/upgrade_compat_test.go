@@ -64,7 +64,7 @@ func TestSessionIDFormatsAcrossVersions(t *testing.T) {
 }
 
 func TestRealityAuthSelector(t *testing.T) {
-	var s RealityAuthSelector
+	s := RealityAuthSelector{AllowLegacyFallback: true}
 	if m := s.Mode(); m != RealityAuthRecords {
 		t.Fatalf("must start with record mode, got %v", m)
 	}
@@ -95,7 +95,7 @@ func TestRealityAuthSelector(t *testing.T) {
 
 // A client must not stay on an old format after its server was updated.
 func TestRealityAuthSelectorLeavesLegacyOnUpdatedServer(t *testing.T) {
-	var s RealityAuthSelector
+	s := RealityAuthSelector{AllowLegacyFallback: true}
 	s.Reject()
 	s.Reject()
 	s.Mode()
@@ -116,7 +116,7 @@ func TestRealityAuthSelectorLeavesLegacyOnUpdatedServer(t *testing.T) {
 
 // A failed probe against a server that is still old must not cost the working format.
 func TestRealityAuthSelectorKeepsLegacyWhenProbeFails(t *testing.T) {
-	var s RealityAuthSelector
+	s := RealityAuthSelector{AllowLegacyFallback: true}
 	s.Reject()
 	s.Reject()
 	s.Mode()

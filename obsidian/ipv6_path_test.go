@@ -82,7 +82,7 @@ func TestRealityAndMaskedUDPOverIPv6(t *testing.T) {
 	}
 	defer srvUDP.Close()
 	mux := NewUDPMux(srvUDP)
-	mux.SetRouteMaskKey(kp.Public)
+	mux.SetRouteMaskKey(RealityRouteMaskKey(authKey))
 	go mux.Run()
 	sess, err := mux.RegisterSession(DeriveUDPKeys(hs.SessionKeys, false))
 	if err != nil {
@@ -101,7 +101,7 @@ func TestRealityAndMaskedUDPOverIPv6(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ch.Close()
-	ch.UseMaskedFormat(kp.Public)
+	ch.UseMaskedFormat(RealityRouteMaskKey(authKey))
 
 	up := make([]byte, 1200)
 	_, _ = rand.Read(up)

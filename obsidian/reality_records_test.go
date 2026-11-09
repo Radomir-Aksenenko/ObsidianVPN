@@ -308,7 +308,7 @@ func TestRealityRecordModeFailsFastAgainstOtherServer(t *testing.T) {
 	kp, _ := GenerateKeypair()
 	ckp, _ := GenerateKeypair()
 	ln, err := ListenObsidianREALITY("127.0.0.1", "0", RealityDemuxConfig{
-		FallbackTarget: target, AuthKey: []byte("server-key"),
+		FallbackTarget: target, AuthKey: []byte("server-secret-key-at-least-16"),
 		HandshakeTimeout: 3 * time.Second, DialTimeout: 3 * time.Second,
 	})
 	if err != nil {
@@ -320,7 +320,7 @@ func TestRealityRecordModeFailsFastAgainstOtherServer(t *testing.T) {
 
 	conn, err := DialObsidianREALITY(ClientTransportConfig{
 		ServerHost: "127.0.0.1", ServerPort: port, SNI: "example.com",
-		RealityEnabled: true, RealityAuthKey: []byte("other-key"),
+		RealityEnabled: true, RealityAuthKey: []byte("other-secret-key-at-least-16"),
 	})
 	if err != nil {
 		// The demuxer relays to the real target, whose flight must reach the client intact:
@@ -346,7 +346,8 @@ func TestRealityRecordModeFailsFastAgainstOtherServer(t *testing.T) {
 func TestRealityDemuxerIdleProberDoesNotBlockAccept(t *testing.T) {
 	authKey := []byte("reality-shared-auth-key-32-byte")
 	ln, err := ListenObsidianREALITY("127.0.0.1", "0", RealityDemuxConfig{
-		AuthKey: authKey, HandshakeTimeout: 5 * time.Second, DialTimeout: time.Second,
+		FallbackTarget: startTLSTarget(t),
+		AuthKey:        authKey, HandshakeTimeout: 5 * time.Second, DialTimeout: time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -433,8 +434,7 @@ func TestTLSRecordConnSplitsAtRecordLimit(t *testing.T) {
 	}
 }
 
-// A target that answers with TLS 1.2 never sends an encrypted record. The relay must not wait
-// for the dial timeout, and the client must still get an encrypted record to go on with.
+// TLS 1.2 cannot be continued with a TLS 1.3 flight; fail without inventing records.
 func TestRelayFirstFlightTLS12Target(t *testing.T) {
 	cert, err := GenerateSelfSignedCertificate("example.com")
 	if err != nil {
@@ -469,15 +469,14 @@ func TestRelayFirstFlightTLS12Target(t *testing.T) {
 	}
 	var out bytes.Buffer
 	start := time.Now()
-	if err := relayFirstFlight(&out, ln.Addr().String(), ch, sid[:], 10*time.Second); err != nil {
-		t.Fatal(err)
+	if err := relayFirstFlight(&out, ln.Addr().String(), ch, sid[:], 10*time.Second); err == nil {
+		t.Fatal("accepted a TLS 1.2 target")
 	}
 	if d := time.Since(start); d > 2*time.Second {
 		t.Fatalf("relay waited %v for a flight that never had encrypted records", d)
 	}
-	types := recordTypes(t, "flight", out.Bytes())
-	if types[len(types)-1] != recordTypeAppData {
-		t.Fatalf("client would wait forever: flight %x has no encrypted record", types)
+	if out.Len() != 0 {
+		t.Fatal("forwarded an incompatible first flight")
 	}
 }
 

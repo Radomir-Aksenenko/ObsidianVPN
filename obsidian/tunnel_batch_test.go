@@ -120,7 +120,10 @@ func BenchmarkTunnelSend(b *testing.B) {
 		}
 		setOptimalTCPConn(c.(*net.TCPConn))
 		if records {
-			c = newTLSRecordConn(c)
+			c, err = newRealityRecordConn(c, make([]byte, 32), make([]byte, 32), true)
+			if err != nil {
+				b.Fatal(err)
+			}
 		}
 		enc, _ := NewCipher([KeySize]byte{1}, [NonceSize]byte{2})
 		dec, _ := NewCipher([KeySize]byte{3}, [NonceSize]byte{4})
@@ -175,7 +178,10 @@ func BenchmarkTunnelRoundTrip(b *testing.B) {
 			}
 			setOptimalTCPConn(c.(*net.TCPConn))
 			if records {
-				c = newTLSRecordConn(c)
+				c, err = newRealityRecordConn(c, make([]byte, 32), make([]byte, 32), false)
+				if err != nil {
+					return
+				}
 			}
 			enc, _ := NewCipher(k2, n2)
 			dec, _ := NewCipher(k1, n1)
@@ -196,7 +202,10 @@ func BenchmarkTunnelRoundTrip(b *testing.B) {
 		}
 		setOptimalTCPConn(c.(*net.TCPConn))
 		if records {
-			c = newTLSRecordConn(c)
+			c, err = newRealityRecordConn(c, make([]byte, 32), make([]byte, 32), true)
+			if err != nil {
+				b.Fatal(err)
+			}
 		}
 		enc, _ := NewCipher(k1, n1)
 		dec, _ := NewCipher(k2, n2)

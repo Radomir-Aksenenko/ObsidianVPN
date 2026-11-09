@@ -126,6 +126,7 @@ func main() {
 		log.Printf("client public key: %s", hex.EncodeToString(clientStatic.Public[:]))
 	}
 	debugf("config: server=%s:%s, no_tls=%v, profile=%q, udp_data=%v", cfg.ServerHost, cfg.ServerPort, cfg.NoTLS, cfg.Profile, cfg.EnableUDPData && cfg.UDPPort != "")
+	realityAuth.AllowLegacyFallback = cfg.RealityLegacyFallback
 	debugf("config: server public key fingerprint=%s", hex.EncodeToString(serverPub[:8]))
 
 	obfCfg := obsidian.DefaultObfuscationConfig()
@@ -215,9 +216,9 @@ func runSession(cfg Config, serverPub [obsidian.KeySize]byte, clientStatic *obsi
 		err  error
 	)
 	confirmHandshake := func() {}
+	var authKeyBytes []byte
 	isReality := cfg.RealityEnabled || cfg.RealityAuthKey != "" || cfg.RealitySNI != ""
 	if isReality {
-		var authKeyBytes []byte
 		if cfg.RealityAuthKey != "" {
 			if b, err := hex.DecodeString(cfg.RealityAuthKey); err == nil && len(b) > 0 {
 				authKeyBytes = b
@@ -225,7 +226,7 @@ func runSession(cfg Config, serverPub [obsidian.KeySize]byte, clientStatic *obsi
 				authKeyBytes = []byte(cfg.RealityAuthKey)
 			}
 		} else {
-			authKeyBytes = serverPub[:]
+			return errors.New("REALITY requires a secret reality_auth_key; the public server key is not a secret")
 		}
 
 		sni := cfg.RealitySNI
@@ -236,14 +237,14 @@ func runSession(cfg Config, serverPub [obsidian.KeySize]byte, clientStatic *obsi
 		fp := parseFingerprint(cfg.Fingerprint)
 		debugf("transport: dialing via REALITY-Plus (SNI=%s)", sni)
 		conn, err = obsidian.DialObsidianREALITY(obsidian.ClientTransportConfig{
-			ServerHost:        cfg.ServerHost,
-			ServerPort:        cfg.ServerPort,
-			SNI:               sni,
-			SNIPool:           cfg.SNIPool,
-			RealityEnabled:    true,
-			RealityAuthKey:    authKeyBytes,
-			RealityMode:       realityAuth.Mode(),
-			Fingerprint:       fp,
+			ServerHost:     cfg.ServerHost,
+			ServerPort:     cfg.ServerPort,
+			SNI:            sni,
+			SNIPool:        cfg.SNIPool,
+			RealityEnabled: true,
+			RealityAuthKey: authKeyBytes,
+			RealityMode:    realityAuth.Mode(),
+			Fingerprint:    fp,
 		})
 		if err == nil {
 			handshook := false
@@ -387,7 +388,7 @@ func runSession(cfg Config, serverPub [obsidian.KeySize]byte, clientStatic *obsi
 		udpCh.MaxTrailer = tunnelCfg.MaxTrailer
 		if obsidian.RealityRecordMode(conn) {
 			// Only a record-mode server is new enough for the masked datagram format.
-			udpCh.UseMaskedFormat(serverPub)
+			udpCh.UseMaskedFormat(obsidian.RealityRouteMaskKey(authKeyBytes))
 		}
 		log.Printf("UDP data channel: %s:%s (bucket_padding=%v)", cfg.ServerHost, cfg.UDPPort, udpCh.UseBucketPadding)
 		// Taken before warmup so that warmup echoes count as proof the UDP path works.

@@ -66,12 +66,12 @@ const (
 )
 
 var (
-	ErrNotTLS              = errors.New("stream does not begin with TLS record")
-	ErrNotClientHello      = errors.New("TLS record is not ClientHello")
-	ErrTruncatedRecord     = errors.New("truncated TLS record")
-	ErrSessionIDInvalid    = errors.New("invalid or unauthenticated SessionID")
-	ErrSessionIDReplayed   = errors.New("replayed SessionID detected")
-	ErrFallbackDialFailed  = errors.New("failed to dial fallback backend")
+	ErrNotTLS             = errors.New("stream does not begin with TLS record")
+	ErrNotClientHello     = errors.New("TLS record is not ClientHello")
+	ErrTruncatedRecord    = errors.New("truncated TLS record")
+	ErrSessionIDInvalid   = errors.New("invalid or unauthenticated SessionID")
+	ErrSessionIDReplayed  = errors.New("replayed SessionID detected")
+	ErrFallbackDialFailed = errors.New("failed to dial fallback backend")
 )
 
 // ── SessionID Steganographic Authenticator ────────────────────────────────────
@@ -150,23 +150,28 @@ var ErrRealityNoServerHello = errors.New("no reality server hello")
 const legacyProbeEvery = 8
 
 // RealityAuthSelector picks the SessionID format for a client that does not know how old its
-// server is. It starts with record mode, steps down to the masked and then the legacy format
-// when the server keeps refusing, and stays with the one that works. Network failures say
-// nothing about the format and must not be reported to it, or phones on a bad connection would
-// drift to the format that is easier to detect.
+// server is. It stays in record mode unless compatibility fallback is explicitly enabled.
+// Compatibility mode can try older formats when a server keeps refusing. Network failures
+// must not trigger fallback: the older formats are easier to recognize.
 type RealityAuthSelector struct {
-	mu        sync.Mutex
-	mode      RealityAuthMode
-	confirmed bool
-	rejects   int
-	sinceTry  int
-	probing   bool
+	// AllowLegacyFallback must be explicitly enabled for pre-record-mode servers.
+	// Falling back after a network failure otherwise exposes the old raw wire format.
+	AllowLegacyFallback bool
+	mu                  sync.Mutex
+	mode                RealityAuthMode
+	confirmed           bool
+	rejects             int
+	sinceTry            int
+	probing             bool
 }
 
 // Mode returns the format for the next connection.
 func (s *RealityAuthSelector) Mode() RealityAuthMode {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.AllowLegacyFallback {
+		return RealityAuthRecords
+	}
 	s.probing = false
 	if s.mode != RealityAuthRecords && s.confirmed {
 		s.sinceTry++
@@ -197,6 +202,9 @@ func (s *RealityAuthSelector) Confirm() {
 func (s *RealityAuthSelector) Reject() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.AllowLegacyFallback {
+		return
+	}
 	if s.probing {
 		s.probing = false
 		return
@@ -590,6 +598,9 @@ func (c *peekedConn) Read(b []byte) (int, error) {
 
 // RealityDemuxConfig specifies configuration parameters for the REALITY demuxer.
 type RealityDemuxConfig struct {
+	// AllowLegacyClients permits the old raw post-ServerHello stream. Keep disabled on
+	// new deployments; one old client is enough to expose that fingerprint for the IP.
+	AllowLegacyClients bool
 	// FallbackTarget is the real target where unauthenticated probes are forwarded (e.g. "www.apple.com:443" or "17.248.190.252:443").
 	FallbackTarget string
 
@@ -726,7 +737,8 @@ func (d *RealityDemuxer) acceptLoop() {
 }
 
 func (d *RealityDemuxer) processIncoming(conn net.Conn) (net.Conn, bool) {
-	_ = conn.SetReadDeadline(time.Now().Add(d.cfg.HandshakeTimeout))
+	handshakeDeadline := time.Now().Add(d.cfg.HandshakeTimeout)
+	_ = conn.SetReadDeadline(handshakeDeadline)
 
 	// We read the initial TLS record header (5 bytes) + payload up to 4096 bytes
 	buf := make([]byte, 4096)
@@ -763,7 +775,7 @@ func (d *RealityDemuxer) processIncoming(conn net.Conn) (net.Conn, bool) {
 	}
 
 	for n < needed {
-		_ = conn.SetReadDeadline(time.Now().Add(d.cfg.HandshakeTimeout))
+		_ = conn.SetReadDeadline(handshakeDeadline)
 		rn, rerr := conn.Read(buf[n:needed])
 		_ = conn.SetReadDeadline(time.Time{})
 		if rerr != nil {
@@ -802,7 +814,7 @@ func (d *RealityDemuxer) processIncoming(conn net.Conn) (net.Conn, bool) {
 
 	// Verify SessionID HMAC token
 	mode, authOK := VerifySessionIDMode(sessionID, sni, d.cfg.AuthKey, DefaultAuthWindowSec)
-	if !authOK {
+	if !authOK || (mode != RealityAuthRecords && !d.cfg.AllowLegacyClients) {
 		// Invalid auth token / Active Prober scanner -> Transparent Proxy!
 		if d.cfg.FallbackTarget != "" {
 			go TransparentSNIProxy(conn, d.cfg.FallbackTarget, buf[:n], d.cfg.DialTimeout)
@@ -831,11 +843,18 @@ func (d *RealityDemuxer) processIncoming(conn net.Conn) (net.Conn, bool) {
 
 	if mode == RealityAuthRecords {
 		// Hand the client the target's real first flight, then talk in TLS records.
+		_ = conn.SetWriteDeadline(time.Now().Add(d.cfg.DialTimeout + flightMaxWait))
 		if err := relayFirstFlight(conn, d.cfg.FallbackTarget, buf[:needed], sessionID, d.cfg.DialTimeout); err != nil {
 			conn.Close()
 			return nil, false
 		}
-		return newTLSRecordConn(newPeekedConn(conn, extraBytes)), true
+		_ = conn.SetWriteDeadline(time.Time{})
+		protected, err := newRealityRecordConn(newPeekedConn(conn, extraBytes), d.cfg.AuthKey, sessionID, false)
+		if err != nil {
+			conn.Close()
+			return nil, false
+		}
+		return protected, true
 	}
 
 	// Authenticated Obsidian Client!

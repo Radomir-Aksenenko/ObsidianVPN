@@ -263,7 +263,7 @@ func TestREALITYClientHandshakeSuccess(t *testing.T) {
 
 	// 2. Start REALITY Listener
 	realityCfg := RealityDemuxConfig{
-		FallbackTarget:   "127.0.0.1:1", // Dummy fallback
+		FallbackTarget:   startTLSTarget(t),
 		ServerNames:      []string{sni},
 		AuthKey:          realityAuthKey,
 		HandshakeTimeout: 3 * time.Second,

@@ -52,6 +52,7 @@ type Config struct {
 	RealityTarget         string   `json:"reality_target,omitempty"`
 	RealityServerNames    []string `json:"reality_server_names,omitempty"`
 	RealityAuthKey        string   `json:"reality_auth_key,omitempty"`
+	RealityLegacyClients  bool     `json:"reality_legacy_clients,omitempty"`
 	RealityBackend        string   `json:"reality_backend,omitempty"`
 	RealityBackendSNI     string   `json:"reality_backend_sni,omitempty"`
 	JunkCount             int      `json:"junk_count"`
@@ -260,7 +261,11 @@ func main() {
 		udpBuf := udpSocketBufferBytes(cfg)
 		setUDPBuffers(udpConn, udpBuf, "udp :"+cfg.UDPPort)
 		udpMux = obsidian.NewUDPMux(udpConn)
-		udpMux.SetRouteMaskKey(serverPub)
+		routeSecret := []byte(cfg.RealityAuthKey)
+		if b, err := hex.DecodeString(cfg.RealityAuthKey); err == nil && len(b) > 0 {
+			routeSecret = b
+		}
+		udpMux.SetRouteMaskKey(obsidian.RealityRouteMaskKey(routeSecret))
 
 		// Register additional ports from PortPool for cryptographic port hopping
 		for _, extraPort := range cfg.PortPool {
@@ -313,12 +318,16 @@ func main() {
 
 	var listener net.Listener
 	if realityTarget != "" {
+		if cfg.RealityAuthKey == "" || len(realityAuthKey) < 16 {
+			log.Fatal("REALITY requires a secret reality_auth_key of at least 16 bytes")
+		}
 		realityDemuxCfg := obsidian.RealityDemuxConfig{
-			FallbackTarget:   realityTarget,
-			ServerNames:      realityServerNames,
-			AuthKey:          realityAuthKey,
-			HandshakeTimeout: 5 * time.Second,
-			DialTimeout:      10 * time.Second,
+			AllowLegacyClients: cfg.RealityLegacyClients,
+			FallbackTarget:     realityTarget,
+			ServerNames:        realityServerNames,
+			AuthKey:            realityAuthKey,
+			HandshakeTimeout:   5 * time.Second,
+			DialTimeout:        10 * time.Second,
 		}
 		listener, err = obsidian.ListenObsidianREALITY(cfg.Host, cfg.Port, realityDemuxCfg)
 		if err != nil {
@@ -331,7 +340,7 @@ func main() {
 				sni = realityServerNames[0]
 			}
 			if err := obsidian.CheckRealityTarget(realityTarget, sni, 10*time.Second); err != nil {
-				log.Printf("WARNING: reality target %s does not negotiate TLS 1.3 for %q (%v); record-mode clients get a synthetic flight, pick a TLS 1.3 target", realityTarget, sni, err)
+				log.Printf("WARNING: reality target %s does not negotiate TLS 1.3 for %q (%v); record-mode connections will fail, pick a TLS 1.3 target", realityTarget, sni, err)
 			}
 		}()
 	} else if cfg.NoTLS {

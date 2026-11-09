@@ -33,12 +33,23 @@ import (
 // Total overhead: 28 bytes per packet (48 bytes with STUN encapsulation).
 //
 // Masked format (both ends on record-mode REALITY): no STUN header, and the RouteTag is XORed
-// with AES(routeMaskKey, sample), where routeMaskKey is derived from the server static key.
+// with AES(routeMaskKey, sample), derived from a private REALITY credential on production paths.
 // The tag used to be the same 4 bytes at a fixed offset in every datagram of a session, an easy
 // flow label for a classifier; masked, every byte of every datagram changes. The server still
 // finds the session with one AES block and one map lookup.
 
 var routeMaskLabel = []byte("obsidian_udp_route_mask_v1")
+
+// RealityRouteMaskKey derives the server-wide route mask seed from the private REALITY
+// credential. A public server key must not let an observer undo every routing tag mask.
+func RealityRouteMaskKey(authKey []byte) [KeySize]byte {
+	h := sha256.New()
+	h.Write([]byte("obsidian_reality_v5_udp_route_key"))
+	h.Write(authKey)
+	var key [KeySize]byte
+	copy(key[:], h.Sum(nil))
+	return key
+}
 
 // newRouteMask derives the server-wide cipher that hides RouteTags.
 func newRouteMask(serverPub [KeySize]byte) cipher.Block {
@@ -69,10 +80,10 @@ const (
 	udpBufSize     = 65536 + 128
 	udpBatchSize   = 32
 
-	STUNMagicCookie uint32 = 0x2112a442
-	STUNHeaderSize         = 20
-	SRTPHeaderSize         = 12
-	RTPPayloadTypeOpus     = 111
+	STUNMagicCookie    uint32 = 0x2112a442
+	STUNHeaderSize            = 20
+	SRTPHeaderSize            = 12
+	RTPPayloadTypeOpus        = 111
 
 	replayWindowSize    = 4096
 	udpSessionQueueSize = 8192
@@ -666,7 +677,7 @@ type UDPMux struct {
 }
 
 // SetRouteMaskKey enables the masked datagram format (see UDPChannel.UseMaskedFormat). Call it
-// before Run with the server static public key.
+// before Run with RealityRouteMaskKey(authKey), never with a public server key.
 func (m *UDPMux) SetRouteMaskKey(serverPub [KeySize]byte) {
 	m.routeMask = newRouteMask(serverPub)
 }

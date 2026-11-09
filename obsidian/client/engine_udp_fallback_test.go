@@ -1,7 +1,9 @@
 package client
 
 import (
+	"crypto/tls"
 	"encoding/hex"
+	"io"
 	"net"
 	"testing"
 	"time"
@@ -22,8 +24,31 @@ func TestSessionStaysUpWhenUDPSetupFails(t *testing.T) {
 
 	kp, _ := obsidian.GenerateKeypair()
 	authKey := "reality-shared-auth-key-32-byte"
+	cert, err := obsidian.GenerateSelfSignedCertificate("example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS13})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer target.Close()
+	go func() {
+		for {
+			conn, err := target.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+				_, _ = io.Copy(io.Discard, conn)
+			}()
+		}
+	}()
 	ln, err := obsidian.ListenObsidianREALITY("::1", "0", obsidian.RealityDemuxConfig{
-		AuthKey: []byte(authKey), HandshakeTimeout: 3 * time.Second, DialTimeout: time.Second,
+		FallbackTarget: target.Addr().String(),
+		AuthKey:        []byte(authKey), HandshakeTimeout: 3 * time.Second, DialTimeout: time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)

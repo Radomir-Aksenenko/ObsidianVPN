@@ -109,8 +109,8 @@ type Session struct {
 	lastHandshake atomic.Int64
 	activeProto   atomic.Pointer[string]
 
-	stopCh chan struct{}
-	doneCh chan struct{}
+	stopCh   chan struct{}
+	doneCh   chan struct{}
 	stopOnce sync.Once
 
 	// netChangeCh carries NetworkChanged signals to the running connection (capacity 1, signals coalesce).
@@ -129,6 +129,9 @@ type Session struct {
 func NewSession(cfg *obsidian.ClientConfig, opts ...Option) (*Session, error) {
 	if cfg == nil {
 		return nil, errors.New("client config is nil")
+	}
+	if (cfg.RealityEnabled || cfg.RealitySNI != "") && cfg.RealityAuthKey == "" {
+		return nil, errors.New("REALITY requires a secret reality_auth_key; the public server key is not a secret")
 	}
 
 	pubBytes, err := hex.DecodeString(cfg.ServerPublicKey)
@@ -180,6 +183,7 @@ func NewSession(cfg *obsidian.ClientConfig, opts ...Option) (*Session, error) {
 		netChangeCh:   make(chan struct{}, 1),
 	}
 	s.activeProto.Store(&proto)
+	s.realityAuth.AllowLegacyFallback = cfg.RealityLegacyFallback
 
 	for _, opt := range opts {
 		opt(s)
@@ -574,7 +578,7 @@ func (s *Session) runConnection(tun io.ReadWriteCloser) error {
 		udpCh.MaxTrailer = s.tunnelCfg.MaxTrailer
 		if obsidian.RealityRecordMode(conn) {
 			// Only a record-mode server is new enough for the masked datagram format.
-			udpCh.UseMaskedFormat(s.serverPub)
+			udpCh.UseMaskedFormat(obsidian.RealityRouteMaskKey(transportCfg.RealityAuthKey))
 		}
 		// Taken before warmup so that warmup echoes count as proof the UDP path works.
 		udpStartNano := time.Now().UnixNano()
@@ -729,7 +733,7 @@ func (s *Session) copyTunToData(tun io.ReadWriter, ch *obsidian.UDPChannel, tunn
 		s.bytesSent.Add(uint64(n))
 
 		if !s.cfg.EnableIPv6 && isIPv6Packet(packet) {
-				s.rejectIPv6(tun, packet, rejectBuf)
+			s.rejectIPv6(tun, packet, rejectBuf)
 			continue
 		}
 
