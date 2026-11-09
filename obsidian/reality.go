@@ -117,13 +117,17 @@ func GenerateMaskedSessionID(authKey []byte, sni string) ([TLSSessionIDSize]byte
 }
 
 func generateMaskedSessionIDAt(authKey []byte, sni string, ts int64) ([TLSSessionIDSize]byte, error) {
+	return generateMaskedSessionIDLabel(authKey, sni, ts, realityAuthLabel)
+}
+
+func generateMaskedSessionIDLabel(authKey []byte, sni string, ts int64, label []byte) ([TLSSessionIDSize]byte, error) {
 	var sessionID [TLSSessionIDSize]byte
 	if _, err := io.ReadFull(rand.Reader, sessionID[:AuthNonceSize]); err != nil {
 		return sessionID, fmt.Errorf("generate auth nonce: %w", err)
 	}
 	mask := authTimestampMask(authKey, sessionID[:AuthNonceSize])
 	binary.BigEndian.PutUint64(sessionID[AuthNonceSize:AuthNonceSize+AuthTimestampSize], uint64(ts)^mask)
-	tag := computeAuthTag(authKey, sessionID[:AuthNonceSize+AuthTimestampSize], sni)
+	tag := computeAuthTagLabel(authKey, label, sessionID[:AuthNonceSize+AuthTimestampSize], sni)
 	copy(sessionID[AuthNonceSize+AuthTimestampSize:], tag[:AuthTagSize])
 	return sessionID, nil
 }
@@ -141,37 +145,38 @@ func authTimestampMask(authKey, nonce []byte) uint64 {
 // TLS answer came back. Unlike a failed connect, this can be a server turning down the SessionID.
 var ErrRealityNoServerHello = errors.New("no reality server hello")
 
-// legacyProbeEvery is how often a client on the legacy format tries the masked one again, so
-// that an updated server moves its clients off the plain timestamp.
+// legacyProbeEvery is how often a client on an older format tries record mode again, so that
+// an updated server moves its clients to the format that is hardest to detect.
 const legacyProbeEvery = 8
 
 // RealityAuthSelector picks the SessionID format for a client that does not know how old its
-// server is. It starts with the masked format and stays with the one that works. Network
-// failures say nothing about the format and must not be reported to it, or phones on a bad
-// connection would drift to the format that is easier to detect.
+// server is. It starts with record mode, steps down to the masked and then the legacy format
+// when the server keeps refusing, and stays with the one that works. Network failures say
+// nothing about the format and must not be reported to it, or phones on a bad connection would
+// drift to the format that is easier to detect.
 type RealityAuthSelector struct {
 	mu        sync.Mutex
-	legacy    bool
+	mode      RealityAuthMode
 	confirmed bool
 	rejects   int
 	sinceTry  int
 	probing   bool
 }
 
-// Legacy reports whether the next connection should use the old plain-timestamp format.
-func (s *RealityAuthSelector) Legacy() bool {
+// Mode returns the format for the next connection.
+func (s *RealityAuthSelector) Mode() RealityAuthMode {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.probing = false
-	if s.legacy && s.confirmed {
+	if s.mode != RealityAuthRecords && s.confirmed {
 		s.sinceTry++
 		if s.sinceTry >= legacyProbeEvery {
 			s.sinceTry = 0
 			s.probing = true
-			return false
+			return RealityAuthRecords
 		}
 	}
-	return s.legacy
+	return s.mode
 }
 
 // Confirm records that the last connection got through the handshake.
@@ -179,7 +184,7 @@ func (s *RealityAuthSelector) Confirm() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.probing {
-		s.legacy = false
+		s.mode = RealityAuthRecords
 		s.probing = false
 	}
 	s.confirmed = true
@@ -202,27 +207,43 @@ func (s *RealityAuthSelector) Reject() {
 	}
 	s.confirmed = false
 	s.rejects = 0
-	s.legacy = !s.legacy
+	s.mode = (s.mode + 1) % realityAuthModes
 }
 
 // VerifySessionID validates a SessionID of either format against the pre-shared auth key, target
 // SNI, and timestamp freshness window. Both are accepted so that clients and servers can be
 // updated independently.
 func VerifySessionID(sessionID []byte, sni string, authKey []byte, windowSec int64) bool {
-	if verifyPlainSessionID(sessionID, sni, authKey, windowSec) {
-		return true
+	_, ok := VerifySessionIDMode(sessionID, sni, authKey, windowSec)
+	return ok
+}
+
+// VerifySessionIDMode is VerifySessionID that also tells which format the client used.
+func VerifySessionIDMode(sessionID []byte, sni string, authKey []byte, windowSec int64) (RealityAuthMode, bool) {
+	if verifyMaskedSessionIDLabel(sessionID, sni, authKey, windowSec, realityRecordsLabel) {
+		return RealityAuthRecords, true
 	}
-	return verifyMaskedSessionID(sessionID, sni, authKey, windowSec)
+	if verifyPlainSessionID(sessionID, sni, authKey, windowSec) {
+		return RealityAuthLegacy, true
+	}
+	if verifyMaskedSessionID(sessionID, sni, authKey, windowSec) {
+		return RealityAuthMasked, true
+	}
+	return 0, false
 }
 
 func verifyMaskedSessionID(sessionID []byte, sni string, authKey []byte, windowSec int64) bool {
+	return verifyMaskedSessionIDLabel(sessionID, sni, authKey, windowSec, realityAuthLabel)
+}
+
+func verifyMaskedSessionIDLabel(sessionID []byte, sni string, authKey []byte, windowSec int64, label []byte) bool {
 	if len(sessionID) != TLSSessionIDSize || len(authKey) == 0 {
 		return false
 	}
 	if windowSec <= 0 {
 		windowSec = DefaultAuthWindowSec
 	}
-	expectedTag := computeAuthTag(authKey, sessionID[:AuthNonceSize+AuthTimestampSize], sni)
+	expectedTag := computeAuthTagLabel(authKey, label, sessionID[:AuthNonceSize+AuthTimestampSize], sni)
 	if subtle.ConstantTimeCompare(sessionID[AuthNonceSize+AuthTimestampSize:], expectedTag[:AuthTagSize]) != 1 {
 		return false
 	}
@@ -258,8 +279,12 @@ func verifyPlainSessionID(sessionID []byte, sni string, authKey []byte, windowSe
 var realityAuthLabel = []byte("obsidian_reality_v3_session_id")
 
 func computeAuthTag(authKey []byte, nonceAndTS []byte, sni string) [32]byte {
+	return computeAuthTagLabel(authKey, realityAuthLabel, nonceAndTS, sni)
+}
+
+func computeAuthTagLabel(authKey, label, nonceAndTS []byte, sni string) [32]byte {
 	mac := hmac.New(sha256.New, authKey)
-	mac.Write(realityAuthLabel)
+	mac.Write(label)
 	mac.Write(nonceAndTS)
 	sni = strings.TrimSpace(sni)
 	var charBuf [1]byte
@@ -591,7 +616,17 @@ type RealityDemuxer struct {
 	replayCache *RealityReplayCache
 	serverNames map[string]struct{}
 	closed      chan struct{}
+	closeOnce   sync.Once
+	startOnce   sync.Once
+	accepted    chan net.Conn
+	acceptErr   chan error
+	// slots bounds the connections whose ClientHello is still being read or checked.
+	slots chan struct{}
 }
+
+// maxPendingHandshakes caps the goroutines reading ClientHellos. Past it the accept loop waits,
+// which is the old serial behaviour, but only once a flood is already under way.
+const maxPendingHandshakes = 1024
 
 // NewRealityDemuxer creates a demuxer that wraps listener with REALITY-Plus masking.
 func NewRealityDemuxer(cfg RealityDemuxConfig, listener net.Listener) *RealityDemuxer {
@@ -616,29 +651,77 @@ func NewRealityDemuxer(cfg RealityDemuxConfig, listener net.Listener) *RealityDe
 		replayCache: NewRealityReplayCache(cfg.ReplayTTL),
 		serverNames: namesMap,
 		closed:      make(chan struct{}),
+		accepted:    make(chan net.Conn),
+		acceptErr:   make(chan error, 1),
+		slots:       make(chan struct{}, maxPendingHandshakes),
 	}
 }
 
 // Accept returns an authenticated Obsidian client connection.
 // Unauthenticated connections, scanners, and active probes are transparently proxied
 // in the background without returning from Accept().
+//
+// Every connection is classified in its own goroutine. Before, one prober that opened a socket
+// and sent nothing held up every client behind it for HandshakeTimeout, and the fallback dial
+// for an authenticated client did the same for up to DialTimeout. Clients then timed out and
+// reconnected, which is exactly the burst of handshakes a censor notices.
 func (d *RealityDemuxer) Accept() (net.Conn, error) {
+	d.startOnce.Do(func() { go d.acceptLoop() })
+	select {
+	case c := <-d.accepted:
+		return c, nil
+	case err := <-d.acceptErr:
+		// Leave the error for any other Accept caller too.
+		select {
+		case d.acceptErr <- err:
+		default:
+		}
+		return nil, err
+	case <-d.closed:
+		return nil, net.ErrClosed
+	}
+}
+
+func (d *RealityDemuxer) acceptLoop() {
 	for {
 		rawConn, err := d.listener.Accept()
 		if err != nil {
-			return nil, err
+			if errors.Is(err, net.ErrClosed) {
+				select {
+				case d.acceptErr <- err:
+				default:
+				}
+				return
+			}
+			// EMFILE and friends: back off instead of spinning, keep serving.
+			select {
+			case <-time.After(50 * time.Millisecond):
+				continue
+			case <-d.closed:
+				return
+			}
 		}
-
 		if tc, ok := rawConn.(*net.TCPConn); ok {
 			_ = tc.SetNoDelay(true)
 		}
-
-		// Handle handshake peek
-		authConn, isObsidian := d.processIncoming(rawConn)
-		if isObsidian {
-			return authConn, nil
+		select {
+		case d.slots <- struct{}{}:
+		case <-d.closed:
+			rawConn.Close()
+			return
 		}
-		// If not Obsidian, processIncoming launched TransparentSNIProxy in background.
+		go func() {
+			authConn, isObsidian := d.processIncoming(rawConn)
+			<-d.slots
+			if !isObsidian {
+				return
+			}
+			select {
+			case d.accepted <- authConn:
+			case <-d.closed:
+				authConn.Close()
+			}
+		}()
 	}
 }
 
@@ -718,7 +801,8 @@ func (d *RealityDemuxer) processIncoming(conn net.Conn) (net.Conn, bool) {
 	}
 
 	// Verify SessionID HMAC token
-	if !VerifySessionID(sessionID, sni, d.cfg.AuthKey, DefaultAuthWindowSec) {
+	mode, authOK := VerifySessionIDMode(sessionID, sni, d.cfg.AuthKey, DefaultAuthWindowSec)
+	if !authOK {
 		// Invalid auth token / Active Prober scanner -> Transparent Proxy!
 		if d.cfg.FallbackTarget != "" {
 			go TransparentSNIProxy(conn, d.cfg.FallbackTarget, buf[:n], d.cfg.DialTimeout)
@@ -739,6 +823,25 @@ func (d *RealityDemuxer) processIncoming(conn net.Conn) (net.Conn, bool) {
 		return nil, false
 	}
 
+	var extraBytes []byte
+	if n > needed {
+		extraBytes = make([]byte, n-needed)
+		copy(extraBytes, buf[needed:n])
+	}
+
+	if mode == RealityAuthRecords {
+		// Hand the client the target's real first flight, then talk in TLS records.
+		flight, ferr := fetchFirstFlight(d.cfg.FallbackTarget, buf[:needed], d.cfg.DialTimeout)
+		if ferr != nil {
+			flight = syntheticFirstFlight(sessionID)
+		}
+		if _, err := conn.Write(flight); err != nil {
+			conn.Close()
+			return nil, false
+		}
+		return newTLSRecordConn(newPeekedConn(conn, extraBytes)), true
+	}
+
 	// Authenticated Obsidian Client!
 	// Deliver valid ServerHello to client so TLS 1.3 State Machine completes legitimately without DPI drops
 	var serverHello []byte
@@ -755,12 +858,6 @@ func (d *RealityDemuxer) processIncoming(conn net.Conn) (net.Conn, bool) {
 	if _, err := conn.Write(serverHello); err != nil {
 		conn.Close()
 		return nil, false
-	}
-
-	var extraBytes []byte
-	if n > needed {
-		extraBytes = make([]byte, n-needed)
-		copy(extraBytes, buf[needed:n])
 	}
 	return newPeekedConn(conn, extraBytes), true
 }
@@ -868,6 +965,7 @@ func buildTLSServerHelloRecord(sessionID []byte) []byte {
 }
 
 func (d *RealityDemuxer) Close() error {
+	d.closeOnce.Do(func() { close(d.closed) })
 	return d.listener.Close()
 }
 

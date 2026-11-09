@@ -231,3 +231,55 @@ func BenchmarkPerfUDPChannelSendRecv(b *testing.B) {
 		}
 	}
 }
+
+// BenchmarkPerfUDPChannelSendRecvMasked is BenchmarkPerfUDPChannelSendRecv in the masked
+// datagram format: no STUN header, RouteTag hidden with one extra AES block per datagram.
+func BenchmarkPerfUDPChannelSendRecvMasked(b *testing.B) {
+	clientConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer clientConn.Close()
+	serverConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer serverConn.Close()
+
+	sk := &SessionKeys{}
+	_, _ = io.ReadFull(rand.Reader, sk.ClientKey[:])
+	_, _ = io.ReadFull(rand.Reader, sk.ServerKey[:])
+	_, _ = io.ReadFull(rand.Reader, sk.SessionID[:])
+	var serverPub [KeySize]byte
+	_, _ = io.ReadFull(rand.Reader, serverPub[:])
+
+	clientCh, err := NewUDPChannel(clientConn, DeriveUDPKeys(sk, true))
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer clientCh.Close()
+	clientCh.SwitchDestination(serverConn.LocalAddr().(*net.UDPAddr))
+	clientCh.UseMaskedFormat(serverPub)
+	// The receiving channel holds the client keys' mirror and the same route mask.
+	serverCh, err := NewUDPChannel(serverConn, DeriveUDPKeys(sk, false))
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer serverCh.Close()
+	serverCh.UseMaskedFormat(serverPub)
+
+	payload := make([]byte, 1360)
+	recvBuf := make([]byte, 2048)
+	sendBuf := make([]byte, 2048)
+	b.SetBytes(int64(len(payload)))
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if err := clientCh.SendWithBuffer(payload, sendBuf); err != nil {
+			b.Fatal(err)
+		}
+		if _, err := serverCh.Recv(recvBuf); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

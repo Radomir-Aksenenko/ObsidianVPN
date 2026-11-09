@@ -96,7 +96,7 @@ func testTunnelBatch(t *testing.T, tweak func(*TunnelConfig)) {
 
 // Sender cost over loopback TCP: 32 full-size packets per turn, one write each or one per batch.
 func BenchmarkTunnelSend(b *testing.B) {
-	run := func(b *testing.B, batched bool) {
+	run := func(b *testing.B, batched, records bool) {
 		ln, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
 			b.Fatal(err)
@@ -119,6 +119,9 @@ func BenchmarkTunnelSend(b *testing.B) {
 			b.Fatal(err)
 		}
 		setOptimalTCPConn(c.(*net.TCPConn))
+		if records {
+			c = newTLSRecordConn(c)
+		}
 		enc, _ := NewCipher([KeySize]byte{1}, [NonceSize]byte{2})
 		dec, _ := NewCipher([KeySize]byte{3}, [NonceSize]byte{4})
 		cfg := DefaultTunnelConfig()
@@ -142,6 +145,73 @@ func BenchmarkTunnelSend(b *testing.B) {
 			}
 		}
 	}
-	b.Run("SendData", func(b *testing.B) { run(b, false) })
-	b.Run("SendDataBatch", func(b *testing.B) { run(b, true) })
+	b.Run("SendData", func(b *testing.B) { run(b, false, false) })
+	b.Run("SendDataBatch", func(b *testing.B) { run(b, true, false) })
+	b.Run("SendData/records", func(b *testing.B) { run(b, false, true) })
+	b.Run("SendDataBatch/records", func(b *testing.B) { run(b, true, true) })
+}
+
+// BenchmarkTunnelRoundTrip moves batches through a sending and a receiving tunnel over loopback
+// TCP, raw and inside TLS records, so the cost of record framing on both ends shows up.
+func BenchmarkTunnelRoundTrip(b *testing.B) {
+	run := func(b *testing.B, records bool) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			b.Fatal(err)
+		}
+		defer ln.Close()
+		cfg := DefaultTunnelConfig()
+		cfg.Jitter = JitterOff
+		cfg.NoiseMinInterval, cfg.NoiseMaxInterval = time.Hour, time.Hour
+		cfg.KeepaliveInterval, cfg.KeepaliveJitter = time.Hour, 0
+		k1, k2 := [KeySize]byte{1}, [KeySize]byte{3}
+		n1, n2 := [NonceSize]byte{2}, [NonceSize]byte{4}
+		const batch = 32
+		got := make(chan int, 1)
+		go func() {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			setOptimalTCPConn(c.(*net.TCPConn))
+			if records {
+				c = newTLSRecordConn(c)
+			}
+			enc, _ := NewCipher(k2, n2)
+			dec, _ := NewCipher(k1, n1)
+			rx := NewTunnel(c, NewStreamFramer(enc, dec), cfg)
+			defer rx.Close()
+			n := 0
+			for {
+				if _, err := rx.RecvData(nil); err != nil {
+					got <- n
+					return
+				}
+				n++
+			}
+		}()
+		c, err := net.Dial("tcp", ln.Addr().String())
+		if err != nil {
+			b.Fatal(err)
+		}
+		setOptimalTCPConn(c.(*net.TCPConn))
+		if records {
+			c = newTLSRecordConn(c)
+		}
+		enc, _ := NewCipher(k1, n1)
+		dec, _ := NewCipher(k2, n2)
+		tx := NewTunnel(c, NewStreamFramer(enc, dec), cfg)
+		pkts := make([][]byte, batch)
+		for i := range pkts {
+			pkts[i] = make([]byte, 1380)
+		}
+		b.SetBytes(int64(batch * 1380))
+		for b.Loop() {
+			_, _ = tx.SendDataBatch(pkts)
+		}
+		tx.Close()
+		<-got
+	}
+	b.Run("raw", func(b *testing.B) { run(b, false) })
+	b.Run("records", func(b *testing.B) { run(b, true) })
 }

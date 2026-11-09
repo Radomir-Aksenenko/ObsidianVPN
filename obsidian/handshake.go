@@ -148,6 +148,10 @@ func BuildJunkTrain(cfg ObfuscationConfig) ([]byte, int, error) {
 //	nonce(16) || tag(8) || masked_len(4) || payload
 const helloFrameLabel = "obsidian_hello_frame_v3"
 
+// ClientHelloScanLimit is how far a client scans for the server hello frame. In REALITY record
+// mode the rest of the target's certificate flight comes first, several KiB for a real site.
+const ClientHelloScanLimit = 64 * 1024
+
 // BuildHelloFrame wraps a handshake message in a randomized, server-specific frame.
 // Wire format:
 //

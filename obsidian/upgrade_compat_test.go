@@ -65,66 +65,72 @@ func TestSessionIDFormatsAcrossVersions(t *testing.T) {
 
 func TestRealityAuthSelector(t *testing.T) {
 	var s RealityAuthSelector
-	if s.Legacy() {
-		t.Fatal("must start with the masked format")
+	if m := s.Mode(); m != RealityAuthRecords {
+		t.Fatalf("must start with record mode, got %v", m)
 	}
 
-	// An old server turns the masked attempt down, and the next one uses the format it knows.
+	// An older server turns record mode down; the client steps to masked, then to legacy.
 	s.Reject()
-	if !s.Legacy() {
-		t.Fatal("must try the legacy format after a reject")
+	if m := s.Mode(); m != RealityAuthMasked {
+		t.Fatalf("after one reject want masked, got %v", m)
+	}
+	s.Reject()
+	if m := s.Mode(); m != RealityAuthLegacy {
+		t.Fatalf("after two rejects want legacy, got %v", m)
 	}
 	s.Confirm()
 
 	// Once a format worked, a couple of rejects must not change it.
 	s.Reject()
 	s.Reject()
-	if !s.Legacy() {
-		t.Fatal("confirmed format changed on two rejects")
+	if m := s.Mode(); m != RealityAuthLegacy {
+		t.Fatalf("confirmed format changed on two rejects: %v", m)
 	}
-	// A longer run can mean that the server was rolled back.
+	// A longer run can mean that the server was rolled back or updated.
 	s.Reject()
-	if s.Legacy() {
-		t.Fatal("selector never retried the other format")
+	if m := s.Mode(); m != RealityAuthRecords {
+		t.Fatalf("selector never wrapped around to record mode: %v", m)
 	}
 }
 
-// A client must not stay on the plain timestamp after its server was updated.
+// A client must not stay on an old format after its server was updated.
 func TestRealityAuthSelectorLeavesLegacyOnUpdatedServer(t *testing.T) {
 	var s RealityAuthSelector
 	s.Reject()
-	s.Legacy()
+	s.Reject()
+	s.Mode()
 	s.Confirm()
 
 	for i := 0; i < legacyProbeEvery*2; i++ {
-		if !s.Legacy() {
-			s.Confirm() // the updated server accepted the masked probe
-			if s.Legacy() {
-				t.Fatal("selector went back to legacy after a masked success")
+		if s.Mode() == RealityAuthRecords {
+			s.Confirm() // the updated server accepted the record-mode probe
+			if m := s.Mode(); m != RealityAuthRecords {
+				t.Fatalf("selector left record mode after a success: %v", m)
 			}
 			return
 		}
 		s.Confirm()
 	}
-	t.Fatal("selector never probed the masked format")
+	t.Fatal("selector never probed record mode")
 }
 
 // A failed probe against a server that is still old must not cost the working format.
 func TestRealityAuthSelectorKeepsLegacyWhenProbeFails(t *testing.T) {
 	var s RealityAuthSelector
 	s.Reject()
-	s.Legacy()
+	s.Reject()
+	s.Mode()
 	s.Confirm()
 
 	for i := 0; i < legacyProbeEvery*3; i++ {
-		if !s.Legacy() {
+		if s.Mode() == RealityAuthRecords {
 			s.Reject()
 			continue
 		}
 		s.Confirm()
 	}
-	if !s.Legacy() {
-		t.Fatal("failed probes moved the client off the format its server accepts")
+	if m := s.Mode(); m != RealityAuthLegacy {
+		t.Fatalf("failed probes moved the client off the format its server accepts: %v", m)
 	}
 }
 

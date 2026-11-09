@@ -169,17 +169,13 @@ func main() {
 		os.Exit(0)
 	}()
 
+	backoff := client.DefaultBackoff()
 	for attempt := 1; ; attempt++ {
 		log.Printf("[attempt %d] connecting to %s:%s", attempt, cfg.ServerHost, cfg.ServerPort)
+		started := time.Now()
 		err := runSession(cfg, serverPub, clientStatic, obfCfg, tunnelCfg, tun)
-		// A stalled UDP path gets a fresh socket on the next attempt, so skip the usual 3s wait.
-		delay := 3 * time.Second
-		if errors.Is(err, client.ErrUDPStalled) {
-			delay = 0
-			log.Printf("UDP data path stalled, reconnecting now")
-		} else {
-			log.Printf("session ended: %v — reconnecting in 3s", err)
-		}
+		delay := backoff.Next(time.Since(started))
+		log.Printf("session ended: %v, reconnecting in %s", err, delay.Round(100*time.Millisecond))
 
 		select {
 		case <-sigCh:
@@ -246,7 +242,7 @@ func runSession(cfg Config, serverPub [obsidian.KeySize]byte, clientStatic *obsi
 			SNIPool:           cfg.SNIPool,
 			RealityEnabled:    true,
 			RealityAuthKey:    authKeyBytes,
-			RealityLegacyAuth: realityAuth.Legacy(),
+			RealityMode:       realityAuth.Mode(),
 			Fingerprint:       fp,
 		})
 		if err == nil {
@@ -336,7 +332,7 @@ func runSession(cfg Config, serverPub [obsidian.KeySize]byte, clientStatic *obsi
 
 	// 4. ServerHello
 	debugf("handshake: waiting for ServerHello (deadline 6s)")
-	srvHello, err := obsidian.ReadHelloFrame(conn, serverPub, 4096, 8192)
+	srvHello, err := obsidian.ReadHelloFrame(conn, serverPub, obsidian.ClientHelloScanLimit, 8192)
 	if err != nil {
 		return fmt.Errorf("read server hello frame: %w (server did not return a recognizable response; verify server_public_key, server logs, and traffic filtering)", err)
 	}
@@ -386,6 +382,10 @@ func runSession(cfg Config, serverPub [obsidian.KeySize]byte, clientStatic *obsi
 			udpCh.BucketMTU = tunnelCfg.BucketMTU
 		}
 		udpCh.MaxTrailer = tunnelCfg.MaxTrailer
+		if obsidian.RealityRecordMode(conn) {
+			// Only a record-mode server is new enough for the masked datagram format.
+			udpCh.UseMaskedFormat(serverPub)
+		}
 		log.Printf("UDP data channel: %s:%s (bucket_padding=%v)", cfg.ServerHost, cfg.UDPPort, udpCh.UseBucketPadding)
 		// Taken before warmup so that warmup echoes count as proof the UDP path works.
 		udpStartNano := time.Now().UnixNano()
@@ -430,9 +430,11 @@ func runSession(cfg Config, serverPub [obsidian.KeySize]byte, clientStatic *obsi
 		go func() {
 			ticker := time.NewTicker(2 * time.Second)
 			defer ticker.Stop()
+			var ticks uint64
 			for {
 				select {
 				case <-ticker.C:
+					ticks++
 					now := time.Now().UnixNano()
 					active := udpActive.Load()
 					authRecv := udpCh.LastAuthRecvNano()
@@ -448,17 +450,16 @@ func runSession(cfg Config, serverPub [obsidian.KeySize]byte, clientStatic *obsi
 					switch client.DecideUDPHealth(silent, everReceived, active) {
 					case client.UDPHealthProbe:
 						_ = udpCh.Send(nil)
-					case client.UDPHealthFailover:
+					case client.UDPHealthFailover, client.UDPHealthReconnect:
 						log.Printf("[FAILOVER] no UDP reply for %v, falling back to TCP REALITY", silent)
 						udpActive.Store(false)
 						udpPendingNano.Store(0)
-					case client.UDPHealthReconnect:
-						errCh <- client.ErrUDPStalled
-						return
 					default:
 						if !active {
-							// In TCP fallback: send periodic lightweight UDP probe to test recovery
-							_ = udpCh.Send(nil)
+							// In TCP fallback: probe for recovery every third tick
+							if ticks%3 == 0 {
+								_ = udpCh.Send(nil)
+							}
 							if (now - authRecv) < 3*time.Second.Nanoseconds() {
 								udpActive.Store(true)
 								udpPendingNano.Store(0)

@@ -186,9 +186,9 @@ func TestDecideUDPHealth(t *testing.T) {
 		{"probe just below dead threshold, never received", UDPDeadAfter - time.Millisecond, false, true, UDPHealthProbe},
 		{"probe just below dead threshold, received earlier", UDPDeadAfter - time.Millisecond, true, true, UDPHealthProbe},
 		{"failover at dead threshold, never received", UDPDeadAfter, false, true, UDPHealthFailover},
-		{"reconnect at dead threshold, received earlier", UDPDeadAfter, true, true, UDPHealthReconnect},
+		{"failover at dead threshold, received earlier", UDPDeadAfter, true, true, UDPHealthFailover},
 		{"failover after long silence, never received", time.Minute, false, true, UDPHealthFailover},
-		{"reconnect after long silence, received earlier", time.Minute, true, true, UDPHealthReconnect},
+		{"failover after long silence, received earlier", time.Minute, true, true, UDPHealthFailover},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

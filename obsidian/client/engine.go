@@ -229,6 +229,7 @@ func (s *Session) Start(dev io.ReadWriteCloser) error {
 	}()
 
 	attempt := 1
+	backoff := DefaultBackoff()
 	for {
 		select {
 		case <-s.stopCh:
@@ -242,7 +243,9 @@ func (s *Session) Start(dev io.ReadWriteCloser) error {
 			s.setStatus(StatusReconnecting, fmt.Sprintf("[Attempt %d] Reconnecting to %s:%s", attempt, s.cfg.ServerHost, s.cfg.ServerPort))
 		}
 
+		started := time.Now()
 		err := s.runConnection(dev)
+		lived := time.Since(started)
 		if err != nil && s.isStopped() {
 			return nil
 		}
@@ -252,16 +255,13 @@ func (s *Session) Start(dev io.ReadWriteCloser) error {
 			return err
 		}
 
-		// A stalled UDP path gets a fresh socket on the next attempt, so skip the usual 3s wait.
-		// The same holds after a network change: the new network is already usable.
-		delay := 3 * time.Second
-		reason := fmt.Sprintf("Connection dropped: %v — reconnecting in 3s", err)
+		// Back off after every session that dies young (see Backoff). A network change is the
+		// one case that reconnects at once: the new network is usable and the old socket is not.
+		delay := backoff.Next(lived)
+		reason := fmt.Sprintf("Connection dropped: %v, reconnecting in %s", err, delay.Round(100*time.Millisecond))
 		if s.netChanged.Swap(false) {
 			delay = 0
 			reason = "Network changed, reconnecting now"
-		} else if errors.Is(err, ErrUDPStalled) {
-			delay = 0
-			reason = "UDP path stalled, reconnecting now"
 		}
 		s.setStatus(StatusReconnecting, reason)
 		select {
@@ -385,15 +385,16 @@ const (
 // DecideUDPHealth picks the next UDP health action. silent is how long the
 // oldest unanswered UDP send has waited for a reply (0 when nothing is pending).
 // Inactive UDP is handled by the monitor's own re-activation check, so it gets None here.
+//
+// A dead UDP path always fails over to the TCP tunnel of the same session. It used to tear the
+// whole session down when UDP had worked before, so a censor throttling UDP made the client open
+// a new TLS connection every ~10 s. UDPHealthReconnect is no longer returned.
 func DecideUDPHealth(silent time.Duration, everReceived, active bool) UDPHealthAction {
 	if !active {
 		return UDPHealthNone
 	}
 	switch {
 	case silent >= UDPDeadAfter:
-		if everReceived {
-			return UDPHealthReconnect
-		}
 		return UDPHealthFailover
 	case silent >= UDPProbeAfter:
 		return UDPHealthProbe
@@ -446,7 +447,7 @@ func (s *Session) runConnection(tun io.ReadWriteCloser) error {
 		transportCfg.SNI = sni
 		transportCfg.RealityEnabled = true
 		transportCfg.RealityAuthKey = authKeyBytes
-		transportCfg.RealityLegacyAuth = s.realityAuth.Legacy()
+		transportCfg.RealityMode = s.realityAuth.Mode()
 		conn, err = obsidian.DialObsidianREALITY(transportCfg)
 		if err == nil {
 			handshook := false
@@ -517,7 +518,7 @@ func (s *Session) runConnection(tun io.ReadWriteCloser) error {
 		return fmt.Errorf("send hello: %w", err)
 	}
 
-	srvHello, err := obsidian.ReadHelloFrame(conn, s.serverPub, 4096, 8192)
+	srvHello, err := obsidian.ReadHelloFrame(conn, s.serverPub, obsidian.ClientHelloScanLimit, 8192)
 	if err != nil {
 		return fmt.Errorf("read server hello: %w", err)
 	}
@@ -565,6 +566,10 @@ func (s *Session) runConnection(tun io.ReadWriteCloser) error {
 			udpCh.BucketMTU = s.tunnelCfg.BucketMTU
 		}
 		udpCh.MaxTrailer = s.tunnelCfg.MaxTrailer
+		if obsidian.RealityRecordMode(conn) {
+			// Only a record-mode server is new enough for the masked datagram format.
+			udpCh.UseMaskedFormat(s.serverPub)
+		}
 		// Taken before warmup so that warmup echoes count as proof the UDP path works.
 		udpStartNano := time.Now().UnixNano()
 		warmupUDPAddress(udpCh)
@@ -634,16 +639,17 @@ func (s *Session) runConnection(tun io.ReadWriteCloser) error {
 					switch DecideUDPHealth(silent, everReceived, active) {
 					case UDPHealthProbe:
 						_ = udpCh.Send(nil)
-					case UDPHealthFailover:
+					case UDPHealthFailover, UDPHealthReconnect:
 						udpActive.Store(false)
 						s.activeProto.Store(&tcpProto)
 						udpPendingNano.Store(0)
-					case UDPHealthReconnect:
-						errCh <- ErrUDPStalled
-						return
 					default:
 						if !active {
-							_ = udpCh.Send(nil)
+							// Probe for recovery every third tick: a steady trickle to a path
+							// that is being dropped is a pattern of its own.
+							if ticks%3 == 0 {
+								_ = udpCh.Send(nil)
+							}
 							if (now - authRecv) < 3*time.Second.Nanoseconds() {
 								udpActive.Store(true)
 								udpPendingNano.Store(0)

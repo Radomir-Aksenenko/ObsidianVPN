@@ -258,6 +258,7 @@ func main() {
 		udpBuf := udpSocketBufferBytes(cfg)
 		setUDPBuffers(udpConn, udpBuf, "udp :"+cfg.UDPPort)
 		udpMux = obsidian.NewUDPMux(udpConn)
+		udpMux.SetRouteMaskKey(serverPub)
 
 		// Register additional ports from PortPool for cryptographic port hopping
 		for _, extraPort := range cfg.PortPool {
@@ -469,6 +470,10 @@ func handleClient(conn net.Conn, priv, pub [obsidian.KeySize]byte,
 			sess.BucketMTU = tunnelCfg.BucketMTU
 		}
 		sess.MaxTrailer = tunnelCfg.MaxTrailer
+		if obsidian.RealityRecordMode(conn) {
+			// A record-mode client also speaks the masked datagram format.
+			sess.UseMaskedFormat()
+		}
 		var lastUDPRecv atomic.Int64
 		var lastTCPRecv atomic.Int64
 

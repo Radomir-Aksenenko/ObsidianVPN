@@ -31,6 +31,35 @@ import (
 //   DPI sees fully random bytes — RouteTag is pseudorandom per session/epoch.
 //
 // Total overhead: 28 bytes per packet (48 bytes with STUN encapsulation).
+//
+// Masked format (both ends on record-mode REALITY): no STUN header, and the RouteTag is XORed
+// with AES(routeMaskKey, sample), where routeMaskKey is derived from the server static key.
+// The tag used to be the same 4 bytes at a fixed offset in every datagram of a session, an easy
+// flow label for a classifier; masked, every byte of every datagram changes. The server still
+// finds the session with one AES block and one map lookup.
+
+var routeMaskLabel = []byte("obsidian_udp_route_mask_v1")
+
+// newRouteMask derives the server-wide cipher that hides RouteTags.
+func newRouteMask(serverPub [KeySize]byte) cipher.Block {
+	h := sha256.New()
+	h.Write(routeMaskLabel)
+	h.Write(serverPub[:])
+	sum := h.Sum(nil)
+	b, err := aes.NewCipher(sum[:16])
+	if err != nil {
+		panic(err) // a 16-byte key cannot fail
+	}
+	return b
+}
+
+// maskRouteTag XORs tag in place with the mask for sample. mask is 16 bytes of scratch.
+func maskRouteTag(rm cipher.Block, tag, sample, mask []byte) {
+	rm.Encrypt(mask[:16], sample[:16])
+	for i := 0; i < UDPTagSize; i++ {
+		tag[i] ^= mask[i]
+	}
+}
 
 const (
 	UDPTagSize     = 4
@@ -326,12 +355,28 @@ type UDPChannel struct {
 	UseBucketPadding bool
 	BucketMTU        int
 	MaxTrailer       int
+	routeMask        cipher.Block
+	recvMask         [16]byte
 
 	sendMu  sync.RWMutex
 	recvMu  sync.Mutex
 	writeMu sync.Mutex
 	sendBuf []byte
 	recvBuf []byte
+}
+
+// UseMaskedFormat switches the channel to the masked datagram format. Only call it when the
+// server is known to accept it, that is when the TCP side runs in REALITY record mode: an
+// older server would misread about one session in sixteen as RTP and drop its packets.
+// Incoming datagrams in the old format are still accepted.
+func (ch *UDPChannel) UseMaskedFormat(serverPub [KeySize]byte) {
+	rm := newRouteMask(serverPub)
+	ch.sendMu.Lock()
+	ch.recvMu.Lock()
+	ch.routeMask = rm
+	ch.EnableSTUN = false
+	ch.recvMu.Unlock()
+	ch.sendMu.Unlock()
 }
 
 func (ch *UDPChannel) writeProtected(buf []byte, n int) error {
@@ -495,6 +540,10 @@ func (ch *UDPChannel) sendWithBuffer(payload []byte, buf []byte) error {
 
 	// 3. Counter protection: XOR 8-byte counter with AES(first 16 bytes of ciphertext)
 	protectCounter(ch.hp, buf[headerOffset+UDPTagSize:headerOffset+UDPHeaderSize], buf[headerOffset+UDPHeaderSize:headerOffset+UDPHeaderSize+16])
+	if ch.routeMask != nil {
+		var mask [16]byte
+		maskRouteTag(ch.routeMask, buf[headerOffset:headerOffset+UDPTagSize], buf[headerOffset+UDPHeaderSize:headerOffset+UDPHeaderSize+16], mask[:])
+	}
 
 	if ch.EnableSTUN {
 		bodyLen := uint16(UDPHeaderSize + len(sealed))
@@ -512,21 +561,32 @@ func (ch *UDPChannel) Recv(dst []byte) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		offset := 0
-		if IsSTUNHeader(ch.recvBuf[:n]) {
-			offset = STUNHeaderSize
-		} else if IsSRTPHeader(ch.recvBuf[:n]) {
-			offset = SRTPHeaderSize
+		var tag [UDPTagSize]byte
+		offset := -1
+		ch.recvMu.Lock()
+		if ch.routeMask != nil && n >= UDPHeaderSize+TagSize {
+			copy(tag[:], ch.recvBuf[:UDPTagSize])
+			maskRouteTag(ch.routeMask, tag[:], ch.recvBuf[UDPHeaderSize:UDPHeaderSize+16], ch.recvMask[:])
+			if tag == ch.tag || (ch.prevDecAEAD != nil && tag == ch.prevTag) {
+				offset = 0
+			}
 		}
-		if n-offset < UDPHeaderSize+TagSize {
-			continue
+		ch.recvMu.Unlock()
+		if offset < 0 {
+			offset = 0
+			if IsSTUNHeader(ch.recvBuf[:n]) {
+				offset = STUNHeaderSize
+			} else if IsSRTPHeader(ch.recvBuf[:n]) {
+				offset = SRTPHeaderSize
+			}
+			if n-offset < UDPHeaderSize+TagSize {
+				continue
+			}
+			copy(tag[:], ch.recvBuf[offset:offset+UDPTagSize])
 		}
 
 		packetData := ch.recvBuf[offset:n]
 		sample := packetData[UDPHeaderSize : UDPHeaderSize+16]
-
-		var tag [UDPTagSize]byte
-		copy(tag[:], packetData[:UDPTagSize])
 
 		ch.recvMu.Lock()
 		isCurrent := ConstantTimeEqual(tag[:], ch.tag[:])
@@ -601,6 +661,63 @@ type UDPMux struct {
 	listMu     sync.Mutex
 	table      *SessionTable
 	mruSession atomic.Pointer[UDPSession]
+	// routeMask unmasks RouteTags of the masked format; nil until SetRouteMaskKey.
+	routeMask cipher.Block
+}
+
+// SetRouteMaskKey enables the masked datagram format (see UDPChannel.UseMaskedFormat). Call it
+// before Run with the server static public key.
+func (m *UDPMux) SetRouteMaskKey(serverPub [KeySize]byte) {
+	m.routeMask = newRouteMask(serverPub)
+}
+
+// findSession resolves a plaintext RouteTag, current or previous epoch.
+func (m *UDPMux) findSession(tag [UDPTagSize]byte) (*UDPSession, bool) {
+	if mru := m.mruSession.Load(); mru != nil {
+		if mru.tag == tag {
+			return mru, false
+		}
+		if mru.prevDecAEAD != nil && mru.prevTag == tag {
+			return mru, true
+		}
+	}
+	if sess := m.table.Get(tag); sess != nil {
+		m.mruSession.Store(sess)
+		return sess, sess.tag != tag && sess.prevTag == tag
+	}
+	return nil, false
+}
+
+// lookupDatagram finds the session a datagram belongs to, whatever its format, and returns the
+// plaintext tag and where the Obsidian header starts. Junk costs at most one AES block and a
+// few map lookups, no AEAD work.
+func (m *UDPMux) lookupDatagram(pkt, mask []byte) (sess *UDPSession, isPrev bool, tag [UDPTagSize]byte, offset int) {
+	n := len(pkt)
+	try := func(off int, masked bool) bool {
+		if n-off < UDPHeaderSize+TagSize {
+			return false
+		}
+		copy(tag[:], pkt[off:off+UDPTagSize])
+		if masked {
+			maskRouteTag(m.routeMask, tag[:], pkt[off+UDPHeaderSize:off+UDPHeaderSize+16], mask)
+		}
+		sess, isPrev = m.findSession(tag)
+		offset = off
+		return sess != nil
+	}
+	if IsSTUNHeader(pkt) && try(STUNHeaderSize, false) {
+		return
+	}
+	if m.routeMask != nil && try(0, true) {
+		return
+	}
+	if IsSRTPHeader(pkt) && try(SRTPHeaderSize, false) {
+		return
+	}
+	if try(0, false) {
+		return
+	}
+	return nil, false, tag, 0
 }
 
 type UDPSession struct {
@@ -612,6 +729,7 @@ type UDPSession struct {
 	prevHp      cipher.Block
 	tag         [UDPTagSize]byte
 	prevTag     [UDPTagSize]byte
+	maskRoute   bool
 
 	clientAddr       atomic.Pointer[net.UDPAddr]
 	activeConn       atomic.Pointer[net.UDPConn]
@@ -698,6 +816,20 @@ func (m *UDPMux) RegisterSession(keys *UDPKeys) (*UDPSession, error) {
 	m.table.Set(s.tag, s)
 	m.mruSession.Store(s)
 	return s, nil
+}
+
+// UseMaskedFormat makes the session send the masked datagram format. Only call it for a client
+// that is known to accept it (REALITY record mode). It reports false when the mux has no
+// route mask key, and the session keeps the old format.
+func (s *UDPSession) UseMaskedFormat() bool {
+	if s.mux.routeMask == nil {
+		return false
+	}
+	s.sendMu.Lock()
+	s.EnableSTUN = false
+	s.maskRoute = true
+	s.sendMu.Unlock()
+	return true
 }
 
 func (m *UDPMux) UnregisterSession(tag [UDPTagSize]byte) {
@@ -795,49 +927,13 @@ func (m *UDPMux) runOnConn(conn *net.UDPConn) {
 		if err != nil {
 			return
 		}
-		offset := 0
-		if IsSTUNHeader(buf[:n]) {
-			offset = STUNHeaderSize
-		} else if IsSRTPHeader(buf[:n]) {
-			offset = SRTPHeaderSize
-		}
-		if n-offset < UDPHeaderSize+TagSize {
+		// O(1) session lookup; unknown datagrams are dropped without any AEAD work.
+		foundSess, isPrevTag, tag, offset := m.lookupDatagram(buf[:n], mask)
+		if foundSess == nil {
 			continue
 		}
-
 		packetData := buf[offset:n]
 		sample := packetData[UDPHeaderSize : UDPHeaderSize+16]
-
-		var tag [UDPTagSize]byte
-		copy(tag[:], packetData[:UDPTagSize])
-
-		var foundSess *UDPSession
-		var isPrevTag bool
-
-		// 1. Fast-path: check most recently used (MRU) session
-		if mru := m.mruSession.Load(); mru != nil {
-			if mru.tag == tag {
-				foundSess = mru
-			} else if mru.prevDecAEAD != nil && mru.prevTag == tag {
-				foundSess = mru
-				isPrevTag = true
-			}
-		}
-
-		// 2. O(1) Sharded Table Lookup: instant session resolution
-		if foundSess == nil {
-			sess := m.table.Get(tag)
-			if sess != nil {
-				foundSess = sess
-				isPrevTag = (sess.tag != tag && sess.prevTag == tag)
-				m.mruSession.Store(sess)
-			}
-		}
-
-		// Instant O(1) drop for unauthorized/invalid packets — 0 crypto operations, 0 DoS!
-		if foundSess == nil {
-			continue
-		}
 
 		// Select cipher and counter protection key based on epoch
 		foundSess.recvMu.Lock()
@@ -1002,6 +1098,9 @@ func (s *UDPSession) sealDatagram(buf, payload []byte) int {
 
 	// 3. Counter protection: XOR counter with AES(ciphertext sample)
 	protectCounterWith(s.hp, buf[headerOffset+UDPTagSize:headerOffset+UDPHeaderSize], buf[headerOffset+UDPHeaderSize:headerOffset+UDPHeaderSize+16], mask)
+	if s.maskRoute {
+		maskRouteTag(s.mux.routeMask, buf[headerOffset:headerOffset+UDPTagSize], buf[headerOffset+UDPHeaderSize:headerOffset+UDPHeaderSize+16], mask)
+	}
 
 	if s.EnableSTUN {
 		bodyLen := uint16(UDPHeaderSize + len(sealed))

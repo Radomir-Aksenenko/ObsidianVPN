@@ -253,7 +253,7 @@ func connect(cfg config, deadline time.Time, verbose bool) (net.Conn, *obsidian.
 		return nil, nil, nil, fmt.Errorf("write hello: %w", err)
 	}
 	trace("handshake: sent ClientHello (%d bytes), waiting for ServerHello", len(helloFrame))
-	serverHello, err := obsidian.ReadHelloFrame(conn, serverPub, 16*1024, 8192)
+	serverHello, err := obsidian.ReadHelloFrame(conn, serverPub, obsidian.ClientHelloScanLimit, 8192)
 	if err != nil {
 		conn.Close()
 		return nil, nil, nil, fmt.Errorf("read server hello: %w (check server_public_key, VPS logs, and traffic filtering)", err)

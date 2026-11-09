@@ -166,7 +166,11 @@ type ClientTransportConfig struct {
 	Fingerprint    *utls.ClientHelloID
 	RealityEnabled bool
 	RealityAuthKey []byte // Pre-shared authentication key for REALITY SessionID HMAC
-	// RealityLegacyAuth sends the plain-timestamp SessionID that older servers need.
+	// RealityMode is the SessionID format and wire format; the zero value is record mode.
+	// Pick it with RealityAuthSelector when the server version is not known.
+	RealityMode RealityAuthMode
+	// RealityLegacyAuth sends the plain-timestamp SessionID that older servers need. It wins
+	// over RealityMode and is kept for callers that predate it.
 	RealityLegacyAuth bool
 	SocketProtector   SocketProtector
 	Dialer            *net.Dialer
@@ -256,8 +260,15 @@ func DialObsidianREALITY(cfg ClientTransportConfig) (net.Conn, error) {
 		}
 	}
 
-	generate := GenerateMaskedSessionID
+	mode := cfg.RealityMode
 	if cfg.RealityLegacyAuth {
+		mode = RealityAuthLegacy
+	}
+	generate := GenerateRecordSessionID
+	switch mode {
+	case RealityAuthMasked:
+		generate = GenerateMaskedSessionID
+	case RealityAuthLegacy:
 		generate = GenerateSessionID
 	}
 	sessionID, err := generate(cfg.RealityAuthKey, sni)
@@ -284,6 +295,22 @@ func DialObsidianREALITY(cfg ClientTransportConfig) (net.Conn, error) {
 	if _, err := rawConn.Write(clientHelloRecord); err != nil {
 		rawConn.Close()
 		return nil, fmt.Errorf("send reality client hello: %w", err)
+	}
+
+	if mode == RealityAuthRecords {
+		// Wait for the server flight like a browser does, then answer with CCS and Finished.
+		// The rest of the flight reaches the tunnel, whose hello scan skips it.
+		_ = rawConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		if err := awaitServerFlight(rawConn); err != nil {
+			rawConn.Close()
+			return nil, err
+		}
+		_ = rawConn.SetReadDeadline(time.Time{})
+		if _, err := rawConn.Write(clientFinishRecords()); err != nil {
+			rawConn.Close()
+			return nil, fmt.Errorf("send reality finished: %w", err)
+		}
+		return newTLSRecordConn(rawConn), nil
 	}
 
 	// Complete legitimate TLS 1.3 handshake state machine by reading ServerHello
