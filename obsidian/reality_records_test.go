@@ -280,18 +280,22 @@ func TestRealityRecordModeStreamIsTLSRecords(t *testing.T) {
 	t.Logf("client->server %d records / %d bytes, server->client %d records / %d bytes", len(upTypes), len(up), len(downTypes), len(down))
 }
 
-func TestFetchFirstFlightReturnsRealFlight(t *testing.T) {
+func TestStreamFlightRelaysRealFlight(t *testing.T) {
 	target := startTLSTarget(t)
 	sid, _ := GenerateRecordSessionID([]byte("k"), "example.com")
 	ch, err := BuildTLSClientHelloRecord("example.com", sid[:], nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	flight, err := fetchFirstFlight(target, ch, 3*time.Second)
-	if err != nil {
-		t.Fatal(err)
+	var out bytes.Buffer
+	sent, sawEncrypted, err := streamFlight(&out, target, ch, 3*time.Second)
+	if !sawEncrypted {
+		t.Fatalf("no encrypted record from a TLS 1.3 target: %v", err)
 	}
-	types := recordTypes(t, "flight", flight)
+	if sent != out.Len() {
+		t.Fatalf("reported %d bytes, wrote %d", sent, out.Len())
+	}
+	types := recordTypes(t, "flight", out.Bytes())
 	if types[0] != recordTypeHandshake || types[len(types)-1] != recordTypeAppData {
 		t.Fatalf("unexpected flight shape %x", types)
 	}
@@ -424,5 +428,59 @@ func TestTLSRecordConnSplitsAtRecordLimit(t *testing.T) {
 	}
 	if string(got) != "abcde" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+// A target that answers with TLS 1.2 never sends an encrypted record. The relay must not wait
+// for the dial timeout, and the client must still get an encrypted record to go on with.
+func TestRelayFirstFlightTLS12Target(t *testing.T) {
+	cert, err := GenerateSelfSignedCertificate("example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{cert}, MaxVersion: tls.VersionTLS12})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+				_, _ = io.Copy(io.Discard, c)
+			}()
+		}
+	}()
+	if err := CheckRealityTarget(ln.Addr().String(), "example.com", 2*time.Second); err == nil {
+		t.Fatal("CheckRealityTarget accepted a TLS 1.2 target")
+	}
+
+	sid, _ := GenerateRecordSessionID([]byte("k"), "example.com")
+	ch, err := BuildTLSClientHelloRecord("example.com", sid[:], nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	start := time.Now()
+	if err := relayFirstFlight(&out, ln.Addr().String(), ch, sid[:], 10*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("relay waited %v for a flight that never had encrypted records", d)
+	}
+	types := recordTypes(t, "flight", out.Bytes())
+	if types[len(types)-1] != recordTypeAppData {
+		t.Fatalf("client would wait forever: flight %x has no encrypted record", types)
+	}
+}
+
+func TestCheckRealityTargetAcceptsTLS13(t *testing.T) {
+	if err := CheckRealityTarget(startTLSTarget(t), "example.com", 2*time.Second); err != nil {
+		t.Fatal(err)
 	}
 }

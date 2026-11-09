@@ -323,6 +323,15 @@ func main() {
 			log.Fatal(err)
 		}
 		log.Printf("ObsidianVPN server listening on %s:%s (REALITY-Plus active: fallback=%s, SNIs=%v)", cfg.Host, cfg.Port, realityTarget, realityServerNames)
+		go func() {
+			sni := ""
+			if len(realityServerNames) > 0 {
+				sni = realityServerNames[0]
+			}
+			if err := obsidian.CheckRealityTarget(realityTarget, sni, 10*time.Second); err != nil {
+				log.Printf("WARNING: reality target %s does not negotiate TLS 1.3 for %q (%v); record-mode clients get a synthetic flight, pick a TLS 1.3 target", realityTarget, sni, err)
+			}
+		}()
 	} else if cfg.NoTLS {
 		log.Printf("WARNING: running without TLS (test mode only)")
 		listener, err = obsidian.ListenTCP(cfg.Host, cfg.Port)

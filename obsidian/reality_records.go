@@ -2,6 +2,7 @@ package obsidian
 
 import (
 	"bufio"
+	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -62,9 +63,9 @@ func GenerateRecordSessionID(authKey []byte, sni string) ([TLSSessionIDSize]byte
 
 const (
 	tlsRecordHeaderSize = 5
-	// tlsMaxRecordPayload is the TLS plaintext limit (2^14). TLS 1.3 ciphertext records can be
-	// up to 2^14+256, so every record we send has a length a real stack could produce.
-	tlsMaxRecordPayload = 16384
+	// tlsMaxRecordPayload is the size of a full TLS 1.3 record as servers send it during bulk
+	// transfer: 2^14 bytes of plaintext, the content type byte and the 16-byte AEAD tag.
+	tlsMaxRecordPayload = 16384 + 1 + 16
 	tlsMaxCiphertext    = 16384 + 256
 
 	recordTypeCCS       = 0x14
@@ -202,60 +203,92 @@ func readTLSRecord(r io.Reader) ([]byte, error) {
 // ── Server side: the first flight ────────────────────────────────────────────
 
 const (
-	// flightIdleGap ends the flight once the target goes quiet after its first encrypted
-	// record. TLS 1.3 servers send the whole flight in one burst and then wait for the client.
+	// flightIdleGap ends the flight once the target goes quiet. TLS 1.3 servers send the whole
+	// flight in one burst and then wait for the client.
 	flightIdleGap = 120 * time.Millisecond
 	flightMaxWait = 3 * time.Second
 	flightMaxSize = 64 * 1024
 )
 
-// fetchFirstFlight sends the client's ClientHello to the genuine target and returns the target's
-// whole first flight: ServerHello, CCS and the encrypted handshake records, as the target sent
-// them. The client gets those exact bytes, so record count and sizes match the real site.
-func fetchFirstFlight(targetAddr string, clientHello []byte, dialTimeout time.Duration) ([]byte, error) {
+// relayFirstFlight sends the client's ClientHello to the genuine target and streams the target's
+// first flight (ServerHello, CCS, encrypted handshake records) to dst record by record, as it
+// arrives. An authenticated client therefore sees the same bytes with the same timing as a
+// prober, whose connection is relayed the same way. Once the target goes quiet the flight is
+// over. If the target cannot be reached, or never sends an encrypted record (TLS 1.2, a
+// HelloRetryRequest), the missing part is synthesized so that the client can go on; check the
+// target with CheckRealityTarget to avoid that.
+func relayFirstFlight(dst io.Writer, targetAddr string, clientHello, sessionID []byte, dialTimeout time.Duration) error {
+	sent, sawEncrypted, err := streamFlight(dst, targetAddr, clientHello, dialTimeout)
+	if sawEncrypted {
+		return nil
+	}
+	if sent == 0 {
+		// Nothing reached the client yet: a whole synthetic flight looks consistent.
+		_, werr := dst.Write(syntheticFirstFlight(sessionID))
+		return werr
+	}
+	if err != nil && errors.Is(err, errFlightWrite) {
+		return err
+	}
+	// The ServerHello went out but no encrypted record followed: finish with a synthetic one.
+	_, werr := dst.Write(syntheticEncryptedFlight())
+	return werr
+}
+
+var errFlightWrite = errors.New("write flight to client")
+
+func streamFlight(dst io.Writer, targetAddr string, clientHello []byte, dialTimeout time.Duration) (sent int, sawEncrypted bool, err error) {
 	if targetAddr == "" {
-		return nil, errors.New("empty fallback target")
+		return 0, false, errors.New("empty fallback target")
 	}
 	conn, err := net.DialTimeout("tcp", targetAddr, dialTimeout)
 	if err != nil {
-		return nil, err
+		return 0, false, err
 	}
 	defer conn.Close()
 	if _, err := conn.Write(clientHello); err != nil {
-		return nil, err
+		return 0, false, err
 	}
 	start := time.Now()
 	_ = conn.SetReadDeadline(start.Add(dialTimeout))
-	var flight []byte
-	sawEncrypted := false
-	for len(flight) < flightMaxSize {
+	for sent < flightMaxSize {
 		rec, err := readTLSRecord(conn)
 		if err != nil {
-			if sawEncrypted {
-				break // the idle gap ran out: the flight is complete
-			}
-			return nil, err
+			return sent, sawEncrypted, err // after the first record this is the idle gap
 		}
 		switch rec[0] {
 		case recordTypeHandshake, recordTypeCCS:
 		case recordTypeAppData:
 			sawEncrypted = true
 		default:
-			return nil, fmt.Errorf("target sent record type 0x%02x", rec[0])
+			return sent, sawEncrypted, fmt.Errorf("target sent record type 0x%02x", rec[0])
 		}
-		flight = append(flight, rec...)
-		if sawEncrypted {
-			deadline := time.Now().Add(flightIdleGap)
-			if max := start.Add(flightMaxWait); deadline.After(max) {
-				deadline = max
-			}
-			_ = conn.SetReadDeadline(deadline)
+		if _, err := dst.Write(rec); err != nil {
+			return sent, sawEncrypted, fmt.Errorf("%w: %w", errFlightWrite, err)
 		}
+		sent += len(rec)
+		deadline := time.Now().Add(flightIdleGap)
+		if max := start.Add(flightMaxWait); deadline.After(max) {
+			deadline = max
+		}
+		_ = conn.SetReadDeadline(deadline)
 	}
-	if !sawEncrypted {
-		return nil, errors.New("target flight has no encrypted records")
+	return sent, sawEncrypted, nil
+}
+
+// CheckRealityTarget reports whether target negotiates TLS 1.3 for sni. Record mode relays the
+// target's flight, and only a TLS 1.3 flight has the shape the client expects.
+func CheckRealityTarget(target, sni string, timeout time.Duration) error {
+	d := &net.Dialer{Timeout: timeout}
+	c, err := tls.DialWithDialer(d, "tcp", target, &tls.Config{
+		ServerName:         sni,
+		InsecureSkipVerify: true, // only the version matters here
+		MinVersion:         tls.VersionTLS13,
+	})
+	if err != nil {
+		return err
 	}
-	return flight, nil
+	return c.Close()
 }
 
 // syntheticFirstFlight stands in when the target cannot be reached: a ServerHello, CCS and
@@ -264,7 +297,13 @@ func syntheticFirstFlight(sessionID []byte) []byte {
 	flight := buildTLSServerHelloRecord(sessionID)
 	flight = appendRecordHeader(flight, recordTypeCCS, 1)
 	flight = append(flight, 0x01)
-	// EncryptedExtensions+Certificate+CertificateVerify, then Finished.
+	return append(flight, syntheticEncryptedFlight()...)
+}
+
+// syntheticEncryptedFlight is the encrypted part of a flight:
+// EncryptedExtensions+Certificate+CertificateVerify, then Finished.
+func syntheticEncryptedFlight() []byte {
+	var flight []byte
 	for _, n := range []int{2600 + mathrand.IntN(2400), 53} {
 		flight = appendRecordHeader(flight, recordTypeAppData, n)
 		start := len(flight)

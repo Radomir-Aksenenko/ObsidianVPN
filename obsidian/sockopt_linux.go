@@ -18,6 +18,7 @@ func tuneTCPSocket(tc *net.TCPConn) {
 	}
 	_ = rc.Control(func(fd uintptr) {
 		_ = unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_NOTSENT_LOWAT, tcpNotSentLowat)
+		_ = unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_USER_TIMEOUT, int(tcpUserTimeout.Milliseconds()))
 	})
 }
 

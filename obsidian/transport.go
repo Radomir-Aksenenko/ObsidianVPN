@@ -345,6 +345,12 @@ func DialObsidianREALITY(cfg ClientTransportConfig) (net.Conn, error) {
 // RTT it matched the throughput of no limit, while 128 KiB sometimes lost up to 20%.
 const tcpNotSentLowat = 256 * 1024
 
+// tcpUserTimeout makes the kernel drop a connection whose data, or keepalive probes, go
+// unacknowledged this long. Without it a path that died silently (cell change, NAT state lost,
+// a middlebox that freezes the flow) kept the tunnel open for the full retransmission timeout,
+// many minutes, because nothing else watches the TCP side once UDP has failed over to it.
+const tcpUserTimeout = 60 * time.Second
+
 // setOptimalTCPConn disables Nagle and limits the unsent queue. It deliberately leaves
 // SO_RCVBUF and SO_SNDBUF alone: setting either one turns off window autotuning, and the kernel
 // silently clamps the request to rmem_max/wmem_max (about 208 KiB on a stock VPS). That capped

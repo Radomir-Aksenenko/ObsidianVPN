@@ -831,11 +831,7 @@ func (d *RealityDemuxer) processIncoming(conn net.Conn) (net.Conn, bool) {
 
 	if mode == RealityAuthRecords {
 		// Hand the client the target's real first flight, then talk in TLS records.
-		flight, ferr := fetchFirstFlight(d.cfg.FallbackTarget, buf[:needed], d.cfg.DialTimeout)
-		if ferr != nil {
-			flight = syntheticFirstFlight(sessionID)
-		}
-		if _, err := conn.Write(flight); err != nil {
+		if err := relayFirstFlight(conn, d.cfg.FallbackTarget, buf[:needed], sessionID, d.cfg.DialTimeout); err != nil {
 			conn.Close()
 			return nil, false
 		}

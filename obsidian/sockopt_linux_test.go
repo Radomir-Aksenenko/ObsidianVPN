@@ -58,6 +58,9 @@ func TestSetOptimalTCPConnKeepsAutotuning(t *testing.T) {
 	if got := getInt(t, rc, unix.IPPROTO_TCP, unix.TCP_NOTSENT_LOWAT); got != tcpNotSentLowat {
 		t.Fatalf("TCP_NOTSENT_LOWAT = %d, want %d", got, tcpNotSentLowat)
 	}
+	if got := getInt(t, rc, unix.IPPROTO_TCP, unix.TCP_USER_TIMEOUT); got != int(tcpUserTimeout.Milliseconds()) {
+		t.Fatalf("TCP_USER_TIMEOUT = %d, want %d", got, tcpUserTimeout.Milliseconds())
+	}
 	if got := getInt(t, rc, unix.IPPROTO_TCP, unix.TCP_NODELAY); got == 0 {
 		t.Fatal("TCP_NODELAY not set")
 	}
