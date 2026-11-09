@@ -323,7 +323,9 @@ func TestRealityRecordModeFailsFastAgainstOtherServer(t *testing.T) {
 		RealityEnabled: true, RealityAuthKey: []byte("other-key"),
 	})
 	if err != nil {
-		return // refused at the flight already: fine
+		// The demuxer relays to the real target, whose flight must reach the client intact:
+		// the rejection may only show up after the client spoke, exactly as with a real site.
+		t.Fatalf("dial must succeed against the relayed target, got %v", err)
 	}
 	defer conn.Close()
 	hs, _ := NewClientHandshakeWithStaticKey(kp.Public, ckp, DefaultObfuscationConfig())

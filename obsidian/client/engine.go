@@ -538,21 +538,27 @@ func (s *Session) runConnection(tun io.ReadWriteCloser) error {
 	defer tunnel.Close()
 
 	// Handle UDP data channel if enabled
+	var (
+		udpConn *net.UDPConn
+		hopAddr *net.UDPAddr
+	)
 	if s.cfg.UDPPort != "" && s.cfg.EnableUDPData {
-		udpKeys := obsidian.DeriveUDPKeys(hs.SessionKeys, true)
 		udpRemote := net.JoinHostPort(s.cfg.ServerHost, s.cfg.UDPPort)
-		var (
-			udpConn *net.UDPConn
-			hopAddr *net.UDPAddr
-		)
+		// "udp", not "udp4": a server given by its IPv6 address must work too.
+		var uerr error
 		if len(s.cfg.PortPool) > 0 {
-			udpConn, hopAddr, err = obsidian.DialHoppingUDP("udp4", udpRemote, s.socketProtector)
+			udpConn, hopAddr, uerr = obsidian.DialHoppingUDP("udp", udpRemote, s.socketProtector)
 		} else {
-			udpConn, err = obsidian.DialProtectedUDP("udp4", udpRemote, s.socketProtector)
+			udpConn, uerr = obsidian.DialProtectedUDP("udp", udpRemote, s.socketProtector)
 		}
-		if err != nil {
-			return fmt.Errorf("dial udp: %w", err)
+		if uerr != nil {
+			// The TCP tunnel is already up. A session without UDP beats a reconnect loop.
+			log.Printf("[ObsidianClient] UDP data path unavailable, staying on TCP: %v", uerr)
+			udpConn = nil
 		}
+	}
+	if udpConn != nil {
+		udpKeys := obsidian.DeriveUDPKeys(hs.SessionKeys, true)
 		setOptimalUDPBuffers(udpConn)
 
 		udpCh, err := obsidian.NewUDPChannel(udpConn, udpKeys)

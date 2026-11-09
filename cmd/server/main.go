@@ -247,11 +247,13 @@ func main() {
 
 	// Start UDP data channel if configured
 	if cfg.UDPPort != "" && cfg.EnableUDPData {
-		udpAddr, err := net.ResolveUDPAddr("udp4", net.JoinHostPort(cfg.Host, cfg.UDPPort))
+		// "udp": with an empty or unspecified host this is one dual-stack socket, so clients
+		// that reach the server over IPv6 get the UDP data path too.
+		udpAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(udpListenHost(cfg.Host), cfg.UDPPort))
 		if err != nil {
 			log.Fatal("resolve udp:", err)
 		}
-		udpConn, err := net.ListenUDP("udp4", udpAddr)
+		udpConn, err := net.ListenUDP("udp", udpAddr)
 		if err != nil {
 			log.Fatal("udp listen:", err)
 		}
@@ -265,12 +267,12 @@ func main() {
 			if fmt.Sprintf("%d", extraPort) == cfg.UDPPort {
 				continue
 			}
-			extraAddr, err := net.ResolveUDPAddr("udp4", net.JoinHostPort(cfg.Host, fmt.Sprintf("%d", extraPort)))
+			extraAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(udpListenHost(cfg.Host), fmt.Sprintf("%d", extraPort)))
 			if err != nil {
 				log.Printf("resolve extra udp port %d: %v", extraPort, err)
 				continue
 			}
-			extraConn, err := net.ListenUDP("udp4", extraAddr)
+			extraConn, err := net.ListenUDP("udp", extraAddr)
 			if err != nil {
 				log.Printf("listen extra udp port %d: %v", extraPort, err)
 				continue
@@ -375,6 +377,15 @@ func main() {
 		}
 		go handleClient(conn, serverPriv, serverPub, allowedClients, revocations, tunnelCfg, obfCfg, cfg, realityTarget != "")
 	}
+}
+
+// udpListenHost turns the unspecified IPv4 address into the empty host, which Go binds as a
+// dual-stack socket. A server configured with 0.0.0.0 used to take UDP over IPv4 only.
+func udpListenHost(host string) string {
+	if host == "0.0.0.0" {
+		return ""
+	}
+	return host
 }
 
 func handleClient(conn net.Conn, priv, pub [obsidian.KeySize]byte,

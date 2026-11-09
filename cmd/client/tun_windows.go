@@ -289,6 +289,12 @@ func openTUN(cfg Config) io.ReadWriteCloser {
 	runCommand("set interface metric", "netsh", "interface", "ip", "set", "interface",
 		"ObsidianVPN", "metric=1")
 
+	// A server reached over IPv6 has no bypass route here (route add below is IPv4 only), so a
+	// ::/0 route into the TUN would send the tunnel's own packets back into the tunnel.
+	if cfg.EnableIPv6 && serverIsIPv6(cfg.ServerHost) {
+		log.Printf("server %s is an IPv6 address: in-tunnel IPv6 stays off to avoid a routing loop", cfg.ServerHost)
+		cfg.EnableIPv6 = false
+	}
 	if cfg.EnableIPv6 {
 		// Enable IPv6 Dual-Stack in-tunnel routing in background without blocking IPv4 tunnel establishment
 		go func() {

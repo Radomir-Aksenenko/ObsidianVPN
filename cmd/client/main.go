@@ -351,24 +351,27 @@ func runSession(cfg Config, serverPub [obsidian.KeySize]byte, clientStatic *obsi
 	tunnel := obsidian.NewTunnel(conn, framer, tunnelCfg)
 	defer tunnel.Close()
 
+	var (
+		udpConn *net.UDPConn
+		hopAddr *net.UDPAddr
+	)
 	if cfg.UDPPort != "" && cfg.EnableUDPData {
-		udpKeys := obsidian.DeriveUDPKeys(hs.SessionKeys, true)
-		udpAddr, err := net.ResolveUDPAddr("udp4", net.JoinHostPort(cfg.ServerHost, cfg.UDPPort))
-		if err != nil {
-			return fmt.Errorf("resolve udp: %w", err)
-		}
-		var (
-			udpConn *net.UDPConn
-			hopAddr *net.UDPAddr
-		)
+		// "udp", not "udp4": a server given by its IPv6 address must work too.
+		udpRemote := net.JoinHostPort(cfg.ServerHost, cfg.UDPPort)
+		var uerr error
 		if len(cfg.PortPool) > 0 {
-			udpConn, hopAddr, err = obsidian.DialHoppingUDP("udp4", udpAddr.String(), nil)
+			udpConn, hopAddr, uerr = obsidian.DialHoppingUDP("udp", udpRemote, nil)
 		} else {
-			udpConn, err = net.DialUDP("udp4", nil, udpAddr)
+			udpConn, uerr = obsidian.DialProtectedUDP("udp", udpRemote, nil)
 		}
-		if err != nil {
-			return fmt.Errorf("dial udp: %w", err)
+		if uerr != nil {
+			// The TCP tunnel is already up. A session without UDP beats a reconnect loop.
+			log.Printf("UDP data path unavailable, staying on TCP: %v", uerr)
+			udpConn = nil
 		}
+	}
+	if udpConn != nil {
+		udpKeys := obsidian.DeriveUDPKeys(hs.SessionKeys, true)
 		setOptimalUDPBuffers(udpConn)
 
 		udpCh, err := obsidian.NewUDPChannel(udpConn, udpKeys)
@@ -849,4 +852,10 @@ func makeObfConfig(cfg Config, oc obsidian.ObfuscationConfig) obsidian.Obfuscati
 		}
 	}
 	return oc
+}
+
+// serverIsIPv6 reports whether host is an IPv6 literal (with or without brackets).
+func serverIsIPv6(host string) bool {
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	return ip != nil && ip.To4() == nil
 }
