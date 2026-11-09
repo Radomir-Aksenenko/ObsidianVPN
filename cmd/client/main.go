@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -126,6 +127,9 @@ func main() {
 		log.Printf("client public key: %s", hex.EncodeToString(clientStatic.Public[:]))
 	}
 	debugf("config: server=%s:%s, no_tls=%v, profile=%q, udp_data=%v", cfg.ServerHost, cfg.ServerPort, cfg.NoTLS, cfg.Profile, cfg.EnableUDPData && cfg.UDPPort != "")
+	if err := cfg.ValidateTransport(); err != nil {
+		log.Fatal(err)
+	}
 	realityAuth.AllowLegacyFallback = cfg.RealityLegacyFallback
 	debugf("config: server public key fingerprint=%s", hex.EncodeToString(serverPub[:8]))
 
@@ -217,8 +221,22 @@ func runSession(cfg Config, serverPub [obsidian.KeySize]byte, clientStatic *obsi
 	)
 	confirmHandshake := func() {}
 	var authKeyBytes []byte
-	isReality := cfg.RealityEnabled || cfg.RealityAuthKey != "" || cfg.RealitySNI != ""
-	if isReality {
+	isNative := cfg.Transport == obsidian.TransportNativeReality
+	isReality := isNative || cfg.RealityEnabled || cfg.RealityAuthKey != "" || cfg.RealitySNI != ""
+	if isNative {
+		sni := cfg.RealitySNI
+		if sni == "" {
+			sni = cfg.SNI
+		}
+		conn, err = obsidian.DialNativeReality(context.Background(), obsidian.ClientTransportConfig{
+			ServerHost: cfg.ServerHost, ServerPort: cfg.ServerPort, SNI: sni,
+		}, cfg.RealityPublicKey, cfg.RealityShortID, cfg.Fingerprint)
+		if b, e := hex.DecodeString(cfg.RealityAuthKey); e == nil {
+			authKeyBytes = b
+		} else {
+			authKeyBytes = []byte(cfg.RealityAuthKey)
+		}
+	} else if isReality {
 		if cfg.RealityAuthKey != "" {
 			if b, err := hex.DecodeString(cfg.RealityAuthKey); err == nil && len(b) > 0 {
 				authKeyBytes = b
@@ -356,7 +374,7 @@ func runSession(cfg Config, serverPub [obsidian.KeySize]byte, clientStatic *obsi
 		udpConn *net.UDPConn
 		hopAddr *net.UDPAddr
 	)
-	if cfg.UDPPort != "" && cfg.EnableUDPData {
+	if cfg.DirectUDPEnabled() {
 		// "udp", not "udp4": a server given by its IPv6 address must work too.
 		udpRemote := net.JoinHostPort(cfg.ServerHost, cfg.UDPPort)
 		var uerr error
@@ -386,7 +404,8 @@ func runSession(cfg Config, serverPub [obsidian.KeySize]byte, clientStatic *obsi
 			udpCh.BucketMTU = tunnelCfg.BucketMTU
 		}
 		udpCh.MaxTrailer = tunnelCfg.MaxTrailer
-		if obsidian.RealityRecordMode(conn) {
+		udpCh.TrafficPadding = obsidian.NativeRealityMode(conn)
+		if obsidian.RealityRecordMode(conn) || obsidian.NativeRealityMode(conn) {
 			// Only a record-mode server is new enough for the masked datagram format.
 			udpCh.UseMaskedFormat(obsidian.RealityRouteMaskKey(authKeyBytes))
 		}
@@ -401,12 +420,13 @@ func runSession(cfg Config, serverPub [obsidian.KeySize]byte, clientStatic *obsi
 				hopSec = 300
 			}
 			go func() {
-				ticker := time.NewTicker(time.Duration(hopSec) * time.Second)
+				ticker := time.NewTimer(obsidian.MaintenanceDelay(time.Duration(hopSec) * time.Second))
 				defer ticker.Stop()
 				var epoch uint64 = 1
 				for {
 					select {
 					case <-ticker.C:
+						ticker.Reset(obsidian.MaintenanceDelay(time.Duration(hopSec) * time.Second))
 						nextPort, err := obsidian.DeriveHoppingPort(hs.SessionKeys.SessionID, epoch, cfg.PortPool)
 						if err == nil {
 							debugf("port hopping: switching destination to port %d (epoch %d)", nextPort, epoch)
@@ -432,13 +452,13 @@ func runSession(cfg Config, serverPub [obsidian.KeySize]byte, clientStatic *obsi
 		// Failover health monitor: if in TCP fallback, periodically tests UDP recovery
 		monitorDone := make(chan struct{})
 		go func() {
-			ticker := time.NewTicker(2 * time.Second)
+			ticker := time.NewTimer(obsidian.MaintenanceDelay(2 * time.Second))
 			defer ticker.Stop()
-			var ticks uint64
+			var schedule obsidian.UDPProbeSchedule
 			for {
 				select {
 				case <-ticker.C:
-					ticks++
+					ticker.Reset(obsidian.MaintenanceDelay(2 * time.Second))
 					now := time.Now().UnixNano()
 					active := udpActive.Load()
 					authRecv := udpCh.LastAuthRecvNano()
@@ -461,7 +481,7 @@ func runSession(cfg Config, serverPub [obsidian.KeySize]byte, clientStatic *obsi
 					default:
 						if !active {
 							// In TCP fallback: probe for recovery every third tick
-							if ticks%3 == 0 {
+							if schedule.Due(time.Unix(0, now), false, authRecv) {
 								_ = udpCh.Send(nil)
 							}
 							if (now - authRecv) < 3*time.Second.Nanoseconds() {
@@ -469,6 +489,8 @@ func runSession(cfg Config, serverPub [obsidian.KeySize]byte, clientStatic *obsi
 								udpPendingNano.Store(0)
 								log.Printf("[FAILOVER] UDP data path recovered (verified healthy responses), seamlessly restoring high-speed UDP WebRTC routing")
 							}
+						} else if schedule.Due(time.Unix(0, now), true, authRecv) {
+							_ = udpCh.Send(nil)
 						}
 					}
 				case <-tunnel.Done():
@@ -561,12 +583,8 @@ func copyTunnelToTun(tunnel *obsidian.Tunnel, tun io.Writer) error {
 func warmupUDPAddress(ch *obsidian.UDPChannel) {
 	// Empty UDP packets are address-learning probes. They make sure the server
 	// knows the client's NAT endpoint before the first real DNS/TCP response.
-	for i := 0; i < 5; i++ {
-		if err := ch.Send(nil); err != nil {
-			log.Printf("udp warmup probe %d failed: %v", i+1, err)
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
+	if err := ch.Send(nil); err != nil {
+		log.Printf("udp warmup probe failed: %v", err)
 	}
 }
 

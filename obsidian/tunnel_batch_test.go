@@ -3,7 +3,11 @@ package obsidian
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"encoding/hex"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
@@ -157,12 +161,25 @@ func BenchmarkTunnelSend(b *testing.B) {
 // BenchmarkTunnelRoundTrip moves batches through a sending and a receiving tunnel over loopback
 // TCP, raw and inside TLS records, so the cost of record framing on both ends shows up.
 func BenchmarkTunnelRoundTrip(b *testing.B) {
-	run := func(b *testing.B, records bool) {
+	run := func(b *testing.B, mode string) {
 		ln, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
 			b.Fatal(err)
 		}
 		defer ln.Close()
+		key, _ := GenerateKeypair()
+		if mode == "native" {
+			cover := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+			cover.EnableHTTP2 = true
+			cover.TLS = &tls.Config{MinVersion: tls.VersionTLS13}
+			cover.StartTLS()
+			defer cover.Close()
+			ln, err = NewNativeRealityListener(context.Background(), ln, NativeRealityServerConfig{Target: cover.Listener.Addr().String(), ServerNames: []string{"example.com"}, PrivateKey: hex.EncodeToString(key.Private[:]), ShortIDs: []string{"1234567890abcdef"}})
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer ln.Close()
+		}
 		cfg := DefaultTunnelConfig()
 		cfg.Jitter = JitterOff
 		cfg.NoiseMinInterval, cfg.NoiseMaxInterval = time.Hour, time.Hour
@@ -176,8 +193,10 @@ func BenchmarkTunnelRoundTrip(b *testing.B) {
 			if err != nil {
 				return
 			}
-			setOptimalTCPConn(c.(*net.TCPConn))
-			if records {
+			if tcp, ok := c.(*net.TCPConn); ok {
+				setOptimalTCPConn(tcp)
+			}
+			if mode == "records" {
 				c, err = newRealityRecordConn(c, make([]byte, 32), make([]byte, 32), false)
 				if err != nil {
 					return
@@ -196,12 +215,20 @@ func BenchmarkTunnelRoundTrip(b *testing.B) {
 				n++
 			}
 		}()
-		c, err := net.Dial("tcp", ln.Addr().String())
+		var c net.Conn
+		if mode == "native" {
+			_, port, _ := net.SplitHostPort(ln.Addr().String())
+			c, err = DialNativeReality(context.Background(), ClientTransportConfig{ServerHost: "127.0.0.1", ServerPort: port, SNI: "example.com"}, hex.EncodeToString(key.Public[:]), "1234567890abcdef", "chrome")
+		} else {
+			c, err = net.Dial("tcp", ln.Addr().String())
+		}
 		if err != nil {
 			b.Fatal(err)
 		}
-		setOptimalTCPConn(c.(*net.TCPConn))
-		if records {
+		if tcp, ok := c.(*net.TCPConn); ok {
+			setOptimalTCPConn(tcp)
+		}
+		if mode == "records" {
 			c, err = newRealityRecordConn(c, make([]byte, 32), make([]byte, 32), true)
 			if err != nil {
 				b.Fatal(err)
@@ -216,11 +243,16 @@ func BenchmarkTunnelRoundTrip(b *testing.B) {
 		}
 		b.SetBytes(int64(batch * 1380))
 		for b.Loop() {
-			_, _ = tx.SendDataBatch(pkts)
+			if _, err := tx.SendDataBatch(pkts); err != nil {
+				b.Fatal(err)
+			}
 		}
 		tx.Close()
-		<-got
+		if n := <-got; n != b.N*batch {
+			b.Fatalf("received %d packets, expected %d", n, b.N*batch)
+		}
 	}
-	b.Run("raw", func(b *testing.B) { run(b, false) })
-	b.Run("records", func(b *testing.B) { run(b, true) })
+	b.Run("raw", func(b *testing.B) { run(b, "raw") })
+	b.Run("records", func(b *testing.B) { run(b, "records") })
+	b.Run("native", func(b *testing.B) { run(b, "native") })
 }

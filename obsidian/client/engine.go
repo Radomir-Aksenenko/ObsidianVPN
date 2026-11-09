@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -130,7 +131,10 @@ func NewSession(cfg *obsidian.ClientConfig, opts ...Option) (*Session, error) {
 	if cfg == nil {
 		return nil, errors.New("client config is nil")
 	}
-	if (cfg.RealityEnabled || cfg.RealitySNI != "") && cfg.RealityAuthKey == "" {
+	if err := cfg.ValidateTransport(); err != nil {
+		return nil, err
+	}
+	if cfg.Transport != obsidian.TransportNativeReality && (cfg.RealityEnabled || cfg.RealitySNI != "") && cfg.RealityAuthKey == "" {
 		return nil, errors.New("REALITY requires a secret reality_auth_key; the public server key is not a secret")
 	}
 
@@ -420,7 +424,8 @@ func (s *Session) runConnection(tun io.ReadWriteCloser) error {
 	default:
 	}
 
-	isReality := s.cfg.RealityEnabled || s.cfg.RealityAuthKey != "" || s.cfg.RealitySNI != ""
+	isNative := s.cfg.Transport == obsidian.TransportNativeReality
+	isReality := isNative || s.cfg.RealityEnabled || s.cfg.RealityAuthKey != "" || s.cfg.RealitySNI != ""
 	transportCfg := obsidian.ClientTransportConfig{
 		ServerHost:      s.cfg.ServerHost,
 		ServerPort:      s.cfg.ServerPort,
@@ -431,7 +436,39 @@ func (s *Session) runConnection(tun io.ReadWriteCloser) error {
 		SocketProtector: s.socketProtector,
 	}
 
-	if isReality {
+	if isNative {
+		if s.cfg.RealitySNI != "" {
+			transportCfg.SNI = s.cfg.RealitySNI
+		}
+		// The upstream handshake happens before watchNetworkChange can own the
+		// completed connection. Cancel it immediately on stop/network change.
+		dialCtx, cancelDial := context.WithCancel(context.Background())
+		dialDone, watcherDone := make(chan struct{}), make(chan struct{})
+		go func() {
+			defer close(watcherDone)
+			select {
+			case <-s.stopCh:
+				cancelDial()
+			case <-s.netChangeCh:
+				s.netChanged.Store(true)
+				cancelDial()
+			case <-dialDone:
+			}
+		}()
+		conn, err = obsidian.DialNativeReality(dialCtx, transportCfg, s.cfg.RealityPublicKey, s.cfg.RealityShortID, s.cfg.Fingerprint)
+		close(dialDone)
+		<-watcherDone
+		if dialCtx.Err() != nil && err == nil {
+			conn.Close()
+			err = dialCtx.Err()
+		}
+		cancelDial()
+		if b, e := hex.DecodeString(s.cfg.RealityAuthKey); e == nil {
+			transportCfg.RealityAuthKey = b
+		} else {
+			transportCfg.RealityAuthKey = []byte(s.cfg.RealityAuthKey)
+		}
+	} else if isReality {
 		var authKeyBytes []byte
 		if s.cfg.RealityAuthKey != "" {
 			if b, err := hex.DecodeString(s.cfg.RealityAuthKey); err == nil && len(b) > 0 {
@@ -546,7 +583,7 @@ func (s *Session) runConnection(tun io.ReadWriteCloser) error {
 		udpConn *net.UDPConn
 		hopAddr *net.UDPAddr
 	)
-	if s.cfg.UDPPort != "" && s.cfg.EnableUDPData {
+	if s.cfg.DirectUDPEnabled() {
 		udpRemote := net.JoinHostPort(s.cfg.ServerHost, s.cfg.UDPPort)
 		// "udp", not "udp4": a server given by its IPv6 address must work too.
 		var uerr error
@@ -576,7 +613,8 @@ func (s *Session) runConnection(tun io.ReadWriteCloser) error {
 			udpCh.BucketMTU = s.tunnelCfg.BucketMTU
 		}
 		udpCh.MaxTrailer = s.tunnelCfg.MaxTrailer
-		if obsidian.RealityRecordMode(conn) {
+		udpCh.TrafficPadding = obsidian.NativeRealityMode(conn)
+		if obsidian.RealityRecordMode(conn) || obsidian.NativeRealityMode(conn) {
 			// Only a record-mode server is new enough for the masked datagram format.
 			udpCh.UseMaskedFormat(obsidian.RealityRouteMaskKey(transportCfg.RealityAuthKey))
 		}
@@ -603,12 +641,13 @@ func (s *Session) runConnection(tun io.ReadWriteCloser) error {
 				hopSec = 300
 			}
 			go func() {
-				ticker := time.NewTicker(time.Duration(hopSec) * time.Second)
+				ticker := time.NewTimer(obsidian.MaintenanceDelay(time.Duration(hopSec) * time.Second))
 				defer ticker.Stop()
 				var epoch uint64 = 1
 				for {
 					select {
 					case <-ticker.C:
+						ticker.Reset(obsidian.MaintenanceDelay(time.Duration(hopSec) * time.Second))
 						nextPort, err := obsidian.DeriveHoppingPort(hs.SessionKeys.SessionID, epoch, s.cfg.PortPool)
 						if err == nil {
 							udpCh.SetRemotePort(nextPort)
@@ -627,13 +666,13 @@ func (s *Session) runConnection(tun io.ReadWriteCloser) error {
 		// Failover health monitor & carrier NAT keepalive
 		monitorDone := make(chan struct{})
 		go func() {
-			ticker := time.NewTicker(2 * time.Second)
+			ticker := time.NewTimer(obsidian.MaintenanceDelay(2 * time.Second))
 			defer ticker.Stop()
-			var ticks uint64
+			var schedule obsidian.UDPProbeSchedule
 			for {
 				select {
 				case <-ticker.C:
-					ticks++
+					ticker.Reset(obsidian.MaintenanceDelay(2 * time.Second))
 					now := time.Now().UnixNano()
 					active := udpActive.Load()
 					authRecv := udpCh.LastAuthRecvNano()
@@ -655,9 +694,8 @@ func (s *Session) runConnection(tun io.ReadWriteCloser) error {
 						udpPendingNano.Store(0)
 					default:
 						if !active {
-							// Probe for recovery every third tick: a steady trickle to a path
-							// that is being dropped is a pattern of its own.
-							if ticks%3 == 0 {
+							// Space recovery probes independently of health checks.
+							if schedule.Due(time.Unix(0, now), false, authRecv) {
 								_ = udpCh.Send(nil)
 							}
 							if (now - authRecv) < 3*time.Second.Nanoseconds() {
@@ -665,7 +703,7 @@ func (s *Session) runConnection(tun io.ReadWriteCloser) error {
 								udpPendingNano.Store(0)
 								s.activeProto.Store(&udpProto)
 							}
-						} else if ticks%8 == 0 {
+						} else if schedule.Due(time.Unix(0, now), true, authRecv) {
 							// Send periodic keepalive to ensure carrier CGNAT pinholes stay open during quiet periods
 							_ = udpCh.Send(nil)
 						}
@@ -861,12 +899,8 @@ func parseFingerprint(name string) *utls.ClientHelloID {
 }
 
 func warmupUDPAddress(ch *obsidian.UDPChannel) {
-	for i := 0; i < 5; i++ {
-		if err := ch.Send(nil); err != nil {
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	// First real uplink also learns the NAT address; no fixed five-packet train.
+	_ = ch.Send(nil)
 }
 
 func setOptimalUDPBuffers(conn *net.UDPConn) {

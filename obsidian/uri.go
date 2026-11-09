@@ -17,6 +17,10 @@ import (
 
 // ClientConfig holds all connection settings for an Obsidian client.
 type ClientConfig struct {
+	Transport             string   `json:"transport,omitempty"`
+	RealityPublicKey      string   `json:"reality_public_key,omitempty"`
+	RealityShortID        string   `json:"reality_short_id,omitempty"`
+	AllowDirectUDP        bool     `json:"allow_direct_udp,omitempty"`
 	ProtocolVersion       int      `json:"protocol_version"`
 	ServerHost            string   `json:"server_host"`
 	ServerPort            string   `json:"server_port"`
@@ -153,6 +157,10 @@ func ParseURI(rawURI string) (*ClientConfig, error) {
 
 	// Parse query parameters
 	q := u.Query()
+	cfg.Transport = q.Get("transport")
+	cfg.RealityPublicKey = q.Get("rpk")
+	cfg.RealityShortID = q.Get("rid")
+	cfg.AllowDirectUDP = parseBool(q.Get("direct_udp"), false)
 
 	if pk := q.Get("pk"); pk != "" {
 		cfg.ServerPublicKey = strings.ToLower(pk)
@@ -352,6 +360,14 @@ func EncodeURI(cfg *ClientConfig, label string) string {
 	}
 
 	q := url.Values{}
+	if cfg.Transport != "" {
+		q.Set("transport", cfg.Transport)
+		q.Set("rpk", cfg.RealityPublicKey)
+		q.Set("rid", cfg.RealityShortID)
+		if cfg.AllowDirectUDP {
+			q.Set("direct_udp", "1")
+		}
+	}
 
 	udpPort := cfg.UDPPort
 	if udpPort == "" {
@@ -373,7 +389,7 @@ func EncodeURI(cfg *ClientConfig, label string) string {
 		q.Set("no_tls", "1")
 	}
 
-	if cfg.RealityEnabled {
+	if cfg.RealityEnabled || cfg.Transport == TransportNativeReality {
 		q.Set("security", "reality")
 		if cfg.RealitySNI != "" {
 			q.Set("sni", cfg.RealitySNI)
@@ -515,6 +531,10 @@ func DecodeKey(keyStr string) (*ClientConfig, error) {
 	}
 
 	re, _ := compact["re"].(bool)
+	cfg.Transport, _ = compact["tr"].(string)
+	cfg.RealityPublicKey, _ = compact["rpk"].(string)
+	cfg.RealityShortID, _ = compact["rid"].(string)
+	cfg.AllowDirectUDP, _ = compact["du"].(bool)
 	rk, _ := compact["rk"].(string)
 	rs, _ := compact["rs"].(string)
 	if re || rk != "" || rs != "" {

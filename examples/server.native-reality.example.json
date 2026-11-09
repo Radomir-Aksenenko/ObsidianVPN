@@ -1,0 +1,18 @@
+{
+  "transport": "native-reality",
+  "host": "0.0.0.0",
+  "port": "443",
+  "protocol_version": 2,
+  "server_private_key": "REPLACE_WITH_INNER_PRIVATE_KEY",
+  "server_public_key": "REPLACE_WITH_INNER_PUBLIC_KEY",
+  "reality_private_key": "REPLACE_WITH_SEPARATE_REALITY_PRIVATE_KEY",
+  "reality_short_ids": ["REPLACE_WITH_RANDOM_16_HEX_CHARS"],
+  "reality_target": "www.microsoft.com:443",
+  "reality_server_names": ["www.microsoft.com"],
+  "tun_interface": "tun0",
+  "tun_address": "10.8.0.1/24",
+  "mtu": 1420,
+  "enable_udp_data": false,
+  "profile": "fast-secure",
+  "jitter": "off"
+}

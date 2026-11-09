@@ -113,6 +113,11 @@ func TestSessionWithPacketDevice(t *testing.T) {
 // A server that accepts and never answers keeps the handshake pending for 6 s. NetworkChanged must cut
 // that connection and dial again at once, without the 6 s handshake wait or the 3 s reconnect delay.
 func TestNetworkChangedReconnectsImmediately(t *testing.T) {
+	t.Run("legacy", func(t *testing.T) { testNetworkChangedReconnects(t, false) })
+	t.Run("native", func(t *testing.T) { testNetworkChangedReconnects(t, true) })
+}
+
+func testNetworkChangedReconnects(t *testing.T, native bool) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -137,6 +142,13 @@ func TestNetworkChangedReconnectsImmediately(t *testing.T) {
 		ServerHost:      host,
 		ServerPort:      port,
 		NoTLS:           true,
+	}
+	if native {
+		cfg.NoTLS = false
+		cfg.Transport = obsidian.TransportNativeReality
+		cfg.RealitySNI = "example.com"
+		cfg.RealityPublicKey = hex.EncodeToString(kp.Public[:])
+		cfg.RealityShortID = "1234567890abcdef"
 	}
 	session, err := NewSession(cfg)
 	if err != nil {

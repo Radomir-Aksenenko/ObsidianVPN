@@ -346,6 +346,8 @@ func (w *replayWindow) Check(seq uint64) bool {
 // ── UDPChannel (client-side, connected socket) ───────────────────────────────
 
 type UDPChannel struct {
+	// TrafficPadding is enabled only after negotiating native REALITY. Set before use.
+	TrafficPadding   bool
 	conn             *net.UDPConn
 	destAddr         atomic.Pointer[net.UDPAddr]
 	encAEAD          cipher.AEAD
@@ -495,7 +497,7 @@ func NewUDPChannel(conn *net.UDPConn, keys *UDPKeys) (*UDPChannel, error) {
 
 // Send encrypts payload, protects counter, sends as one UDP datagram.
 func (ch *UDPChannel) Send(payload []byte) error {
-	required := STUNHeaderSize + UDPHeaderSize + len(payload) + TagSize + 64
+	required := STUNHeaderSize + UDPHeaderSize + len(payload) + TagSize + 192
 	pBuf := getUDPSendBuf(required)
 	defer putUDPSendBuf(pBuf)
 	ch.sendMu.RLock()
@@ -505,7 +507,7 @@ func (ch *UDPChannel) Send(payload []byte) error {
 
 // SendWithBuffer encrypts and sends payload using caller-owned scratch space.
 func (ch *UDPChannel) SendWithBuffer(payload []byte, buf []byte) error {
-	required := STUNHeaderSize + UDPHeaderSize + len(payload) + TagSize + 64
+	required := STUNHeaderSize + UDPHeaderSize + len(payload) + TagSize + 192
 	if len(buf) < required {
 		return io.ErrShortBuffer
 	}
@@ -519,7 +521,9 @@ func (ch *UDPChannel) sendWithBuffer(payload []byte, buf []byte) error {
 
 	plainPayload := payload
 	var pBufHolder *[]byte
-	if ch.UseBucketPadding && len(payload) > 0 {
+	if ch.TrafficPadding {
+		plainPayload, pBufHolder = shapeUDPPayload(payload)
+	} else if ch.UseBucketPadding && len(payload) > 0 {
 		padLen := CalculateBucketPaddingWithTrailer(2+len(payload), ch.BucketMTU, ch.MaxTrailer)
 		totalPlain := 2 + len(payload) + padLen
 		pBufHolder = getUDPPlainBuf()
@@ -636,6 +640,14 @@ func (ch *UDPChannel) Recv(dst []byte) (int, error) {
 			continue
 		}
 		ch.lastAuthRecvNano.Store(time.Now().UnixNano())
+		if ch.TrafficPadding {
+			actual, ok := unshapeUDPPayload(plain)
+			if !ok || len(actual) == 0 {
+				continue
+			}
+			copy(dst, actual)
+			return len(actual), nil
+		}
 
 		// Unframe Bucket Padding length if present
 		if ch.UseBucketPadding && len(plain) >= 2 {
@@ -732,15 +744,16 @@ func (m *UDPMux) lookupDatagram(pkt, mask []byte) (sess *UDPSession, isPrev bool
 }
 
 type UDPSession struct {
-	mux         *UDPMux
-	encAEAD     cipher.AEAD
-	decAEAD     cipher.AEAD
-	prevDecAEAD cipher.AEAD
-	hp          cipher.Block
-	prevHp      cipher.Block
-	tag         [UDPTagSize]byte
-	prevTag     [UDPTagSize]byte
-	maskRoute   bool
+	TrafficPadding bool
+	mux            *UDPMux
+	encAEAD        cipher.AEAD
+	decAEAD        cipher.AEAD
+	prevDecAEAD    cipher.AEAD
+	hp             cipher.Block
+	prevHp         cipher.Block
+	tag            [UDPTagSize]byte
+	prevTag        [UDPTagSize]byte
+	maskRoute      bool
 
 	clientAddr       atomic.Pointer[net.UDPAddr]
 	activeConn       atomic.Pointer[net.UDPConn]
@@ -790,7 +803,14 @@ func (m *UDPMux) AddListener(conn *net.UDPConn) {
 	m.listeners.Store(&updated)
 }
 
-func (m *UDPMux) RegisterSession(keys *UDPKeys) (*UDPSession, error) {
+// UDPSessionOptions are applied before publishing the session to the receiving
+// mux. A first uplink must not race with setup of its negotiated wire format.
+type UDPSessionOptions struct {
+	Masked, TrafficPadding, UseBucketPadding bool
+	BucketMTU, MaxTrailer                    int
+}
+
+func (m *UDPMux) RegisterSession(keys *UDPKeys, options ...UDPSessionOptions) (*UDPSession, error) {
 	enc, err := chacha20poly1305.New(keys.SendKey[:])
 	if err != nil {
 		return nil, err
@@ -823,6 +843,21 @@ func (m *UDPMux) RegisterSession(keys *UDPKeys) (*UDPSession, error) {
 	s.rtpSeq.Store(uint32(mathrand.Uint32() & 0xFFFF))
 	s.rtpTS.Store(mathrand.Uint32())
 	s.activeConn.Store(m.conn)
+	if len(options) > 0 {
+		o := options[0]
+		s.TrafficPadding = o.TrafficPadding
+		s.UseBucketPadding = o.UseBucketPadding
+		if o.BucketMTU > 0 {
+			s.BucketMTU = o.BucketMTU
+		}
+		s.MaxTrailer = o.MaxTrailer
+		if o.Masked {
+			if m.routeMask == nil {
+				return nil, errors.New("masked UDP requires a route mask key")
+			}
+			s.maskRoute, s.EnableSTUN = true, false
+		}
+	}
 
 	m.table.Set(s.tag, s)
 	m.mruSession.Store(s)
@@ -992,7 +1027,14 @@ func (m *UDPMux) runOnConn(conn *net.UDPConn) {
 
 		// 7. Unframe Bucket Padding length if enabled
 		actual := plain
-		if foundSess.UseBucketPadding && len(plain) >= 2 {
+		if foundSess.TrafficPadding {
+			var ok bool
+			actual, ok = unshapeUDPPayload(plain)
+			if !ok {
+				PutPacket(plain)
+				continue
+			}
+		} else if foundSess.UseBucketPadding && len(plain) >= 2 {
 			origLen := int(binary.BigEndian.Uint16(plain[:2]))
 			if origLen > 0 && origLen <= len(plain)-2 {
 				actual = plain[2 : 2+origLen]
@@ -1074,7 +1116,9 @@ func (s *UDPSession) sealDatagram(buf, payload []byte) int {
 
 	plainPayload := payload
 	var padBufHolder *[]byte
-	if s.UseBucketPadding && len(payload) > 0 {
+	if s.TrafficPadding {
+		plainPayload, padBufHolder = shapeUDPPayload(payload)
+	} else if s.UseBucketPadding && len(payload) > 0 {
 		padLen := CalculateBucketPaddingWithTrailer(2+len(payload), s.BucketMTU, s.MaxTrailer)
 		totalPlain := 2 + len(payload) + padLen
 		padBufHolder = getUDPPlainBuf()

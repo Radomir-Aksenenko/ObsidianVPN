@@ -45,6 +45,7 @@ revoked_clients.json
 
 # Machine Learning and Testbed dumps
 tools/tspu_testbed/__pycache__/
+research_notes/**/.sources/
 *.pt
 *.tmp
 *.log

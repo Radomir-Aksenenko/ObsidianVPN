@@ -1,0 +1,18 @@
+{
+  "transport": "native-reality",
+  "protocol_version": 2,
+  "server_host": "198.51.100.1",
+  "server_port": "443",
+  "server_public_key": "REPLACE_WITH_INNER_PUBLIC_KEY",
+  "reality_public_key": "REPLACE_WITH_REALITY_PUBLIC_KEY",
+  "reality_short_id": "REPLACE_WITH_RANDOM_16_HEX_CHARS",
+  "reality_sni": "www.microsoft.com",
+  "fingerprint": "chrome",
+  "allow_direct_udp": false,
+  "enable_udp_data": false,
+  "tun_address": "10.8.0.2/24",
+  "dns": "1.1.1.1",
+  "mtu": 1420,
+  "profile": "fast-secure",
+  "jitter": "off"
+}

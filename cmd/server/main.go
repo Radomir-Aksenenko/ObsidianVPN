@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -23,6 +24,9 @@ import (
 )
 
 type Config struct {
+	Transport             string   `json:"transport,omitempty"`
+	RealityPrivateKey     string   `json:"reality_private_key,omitempty"`
+	RealityShortIDs       []string `json:"reality_short_ids,omitempty"`
 	ProtocolVersion       int      `json:"protocol_version"`
 	Host                  string   `json:"host"`
 	Port                  string   `json:"port"`
@@ -147,6 +151,17 @@ func main() {
 		}
 		fmt.Printf("server_private_key: %s\n", hex.EncodeToString(kp.Private[:]))
 		fmt.Printf("server_public_key:  %s\n", hex.EncodeToString(kp.Public[:]))
+		transportKey, err := obsidian.GenerateKeypair()
+		if err != nil {
+			log.Fatal(err)
+		}
+		shortID, err := obsidian.RandomBytes(8)
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Printf("reality_private_key: %s\n", hex.EncodeToString(transportKey.Private[:]))
+		fmt.Printf("reality_public_key: %s\n", hex.EncodeToString(transportKey.Public[:]))
+		fmt.Printf("reality_short_id: %s\n", hex.EncodeToString(shortID))
 		return
 	}
 
@@ -163,6 +178,20 @@ func main() {
 		log.Fatal(err)
 	}
 	f.Close()
+	if cfg.Transport == obsidian.TransportNativeReality {
+		if cfg.NoTLS || cfg.RealityLegacyClients {
+			log.Fatal("native REALITY cannot enable no_tls or legacy clients")
+		}
+		if cfg.EnableUDPData {
+			secret, err := hex.DecodeString(cfg.RealityAuthKey)
+			if err != nil {
+				secret = []byte(cfg.RealityAuthKey)
+			}
+			if len(secret) < 16 || cfg.MTU > 1420 {
+				log.Fatal("native direct UDP needs a separate >=16-byte reality_auth_key and inner MTU <=1420")
+			}
+		}
+	}
 
 	if cfg.ProtocolVersion != 0 && cfg.ProtocolVersion != obsidian.ProtocolVersion {
 		log.Fatalf("unsupported protocol_version: %d (server supports %d)", cfg.ProtocolVersion, obsidian.ProtocolVersion)
@@ -317,7 +346,22 @@ func main() {
 	obsidian.SetServerTCPCongestion(tcpCongestion(cfg))
 
 	var listener net.Listener
-	if realityTarget != "" {
+	if cfg.Transport == obsidian.TransportNativeReality {
+		rawListener, err := obsidian.ListenTCP(cfg.Host, cfg.Port)
+		if err != nil {
+			log.Fatal(err)
+		}
+		listener, err = obsidian.NewNativeRealityListener(context.Background(), rawListener, obsidian.NativeRealityServerConfig{
+			Target: realityTarget, ServerNames: realityServerNames, PrivateKey: cfg.RealityPrivateKey, ShortIDs: cfg.RealityShortIDs,
+		})
+		if err != nil {
+			rawListener.Close()
+			log.Fatal(err)
+		}
+		log.Printf("Obsidian listening on %s:%s (native REALITY, completed TLS; direct UDP enabled=%v)", cfg.Host, cfg.Port, cfg.EnableUDPData)
+	} else if cfg.Transport != "" {
+		log.Fatalf("unknown transport %q", cfg.Transport)
+	} else if realityTarget != "" {
 		if cfg.RealityAuthKey == "" || len(realityAuthKey) < 16 {
 			log.Fatal("REALITY requires a secret reality_auth_key of at least 16 bytes")
 		}
@@ -488,21 +532,16 @@ func handleClient(conn net.Conn, priv, pub [obsidian.KeySize]byte,
 	if cfg.UDPPort != "" && cfg.EnableUDPData && udpMux != nil {
 		// UDP data relay — TCP stays available as fallback until the UDP endpoint is learned.
 		udpKeys := obsidian.DeriveUDPKeys(hs.SessionKeys, false)
-		sess, err := udpMux.RegisterSession(udpKeys)
+		sess, err := udpMux.RegisterSession(udpKeys, obsidian.UDPSessionOptions{
+			Masked:         obsidian.RealityRecordMode(conn) || obsidian.NativeRealityMode(conn),
+			TrafficPadding: obsidian.NativeRealityMode(conn), UseBucketPadding: tunnelCfg.UseBucketPadding,
+			BucketMTU: tunnelCfg.BucketMTU, MaxTrailer: tunnelCfg.MaxTrailer,
+		})
 		if err != nil {
 			log.Printf("session %s: udp register: %v", sessionID, err)
 			return
 		}
 		defer sess.Close()
-		sess.UseBucketPadding = tunnelCfg.UseBucketPadding
-		if tunnelCfg.BucketMTU > 0 {
-			sess.BucketMTU = tunnelCfg.BucketMTU
-		}
-		sess.MaxTrailer = tunnelCfg.MaxTrailer
-		if obsidian.RealityRecordMode(conn) {
-			// A record-mode client also speaks the masked datagram format.
-			sess.UseMaskedFormat()
-		}
 		var lastUDPRecv atomic.Int64
 		var lastTCPRecv atomic.Int64
 
