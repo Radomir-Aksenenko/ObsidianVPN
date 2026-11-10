@@ -286,7 +286,7 @@ const (
 	// may end the flight. A certificate chain is always larger, so a target that pauses after
 	// EncryptedExtensions (fetching OCSP, a slow backend) is waited for instead of cut short.
 	flightCertBytes = 512
-	flightMaxSize = 64 * 1024
+	flightMaxSize   = 64 * 1024
 )
 
 // relayFirstFlight sends the client's ClientHello to the genuine target and streams the target's
