@@ -74,6 +74,9 @@ type TunnelConfig struct {
 	UseBucketPadding   bool
 	BucketMTU          int
 	MaxTrailer         int
+	// HandshakePadding pads DATA packets that start a TLS handshake and follows them with a NOISE
+	// frame, within a byte budget (see handshake_padding.go). Peers need no support for it.
+	HandshakePadding bool
 }
 
 const tunnelWriteTimeout = 30 * time.Second
@@ -97,6 +100,7 @@ func DefaultTunnelConfig() TunnelConfig {
 		UseBucketPadding:   false,
 		BucketMTU:          1360,
 		MaxTrailer:         0,
+		HandshakePadding:   true,
 	}
 }
 
@@ -262,6 +266,8 @@ type Tunnel struct {
 	maxDuration      time.Duration
 	maxPackets       uint64
 	packetCount      atomic.Uint64
+	hsPad            bool
+	hsBudget         handshakePadBudget // guarded by sendMu
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -305,6 +311,7 @@ func NewTunnel(conn net.Conn, framer *StreamFramer, cfg TunnelConfig) *Tunnel {
 		createdAt:   now,
 		maxDuration: dynDuration,
 		maxPackets:  cfg.MaxSessionPackets,
+		hsPad:       cfg.HandshakePadding,
 		ctx:         ctx,
 		cancel:      cancel,
 	}
@@ -326,6 +333,10 @@ func NewTunnel(conn net.Conn, framer *StreamFramer, cfg TunnelConfig) *Tunnel {
 
 // SendData отправляет IP пакет через туннель.
 func (t *Tunnel) SendData(payload []byte) error {
+	if t.hsPad && LooksLikeTLSHandshake(payload) {
+		_, err := t.SendDataBatch([][]byte{payload})
+		return err
+	}
 	t.applyBurstJitter()
 	return t.writePacket(PacketData, payload)
 }
@@ -367,6 +378,15 @@ func (t *Tunnel) SendDataBatch(packets [][]byte) (int, error) {
 			return sent, io.ErrClosedPipe
 		}
 		need := 4 + packetHeaderSize + len(p) + 256 + TagSize
+		pad, noise := 0, 0
+		if t.hsPad && LooksLikeTLSHandshake(p) {
+			pad, noise = handshakePadPlan()
+			if t.hsBudget.take(pad+noise+4+packetHeaderSize+TagSize, time.Now()) {
+				need += 4 + packetHeaderSize + noise + 256 + TagSize
+			} else {
+				pad, noise = 0, 0
+			}
+		}
 		if len(buf) > 0 && len(buf)+need > tunnelBatchLimit {
 			if err := flush(); err != nil {
 				return sent, err
@@ -377,7 +397,18 @@ func (t *Tunnel) SendDataBatch(packets [][]byte) (int, error) {
 			copy(grown, buf)
 			buf = grown
 		}
-		n, err := t.framer.FrameWithBuffer(buf[len(buf):len(buf)+need], PacketData, p)
+		var n int
+		var err error
+		if pad > 0 {
+			n, err = t.framer.FrameWithPadding(buf[len(buf):len(buf)+need], PacketData, p, pad, pad)
+			if err == nil {
+				var m int
+				m, err = t.appendNoiseFrame(buf[len(buf)+n:len(buf)+need], noise)
+				n += m
+			}
+		} else {
+			n, err = t.framer.FrameWithBuffer(buf[len(buf):len(buf)+need], PacketData, p)
+		}
 		if err != nil {
 			if ferr := flush(); ferr != nil {
 				return sent, ferr
@@ -392,6 +423,13 @@ func (t *Tunnel) SendDataBatch(packets [][]byte) (int, error) {
 	}
 	t.lastAuthNano.Store(time.Now().UnixNano())
 	return sent, nil
+}
+
+// appendNoiseFrame writes a NOISE frame with a random payload of size bytes into dst.
+func (t *Tunnel) appendNoiseFrame(dst []byte, size int) (int, error) {
+	var payload [hsNoiseMax]byte
+	FastRandomBytes(payload[:size])
+	return t.framer.FrameWithBuffer(dst, PacketNoise, payload[:size])
 }
 
 // applyBurstJitter delays the first DATA packet of a burst instead of every packet.

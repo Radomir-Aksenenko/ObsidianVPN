@@ -398,6 +398,12 @@ func (f *StreamFramer) FrameWithBuffer(dst []byte, ptype PacketType, payload []b
 		padMin = padLen
 		padMax = padLen
 	}
+	return f.FrameWithPadding(dst, ptype, payload, padMin, padMax)
+}
+
+// FrameWithPadding frames payload with padding drawn from [padMin, padMax), capped at 255 bytes
+// by the one-byte PAD_LEN field. The receiver strips padding the same way for every frame.
+func (f *StreamFramer) FrameWithPadding(dst []byte, ptype PacketType, payload []byte, padMin, padMax int) (int, error) {
 	if len(dst) < 4 {
 		return 0, io.ErrShortBuffer
 	}
