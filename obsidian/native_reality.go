@@ -8,11 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unsafe"
 
+	utls "github.com/refraction-networking/utls"
 	upstream "github.com/xtls/reality"
 	xnet "github.com/xtls/xray-core/common/net"
 	xreality "github.com/xtls/xray-core/transport/internet/reality"
@@ -140,7 +143,31 @@ func DialNativeReality(ctx context.Context, cfg ClientTransportConfig, publicKey
 		conn.Close()
 		return nil, err
 	}
+	disableDynamicRecordSizing(conn)
 	return &nativeRealityConn{conn}, nil
+}
+
+// disableDynamicRecordSizing turns off Go TLS dynamic record sizing on an established native
+// REALITY client connection. With it on, the first 128 KiB of application data leave in records
+// of exactly 1203 bytes whenever a write is larger, a pattern of Go TLS clients (Xray among
+// them) that Chrome does not show: BoringSSL sizes records by the write, up to 16 KiB.
+//
+// Xray builds the uTLS config per connection and does not expose it, so the flag is set through
+// the unexported config pointer of the pinned uTLS version. It must run before the first
+// application write. It returns false if the field is not where it is expected, which
+// TestNativeRealityRecordsFollowWrites catches on a uTLS upgrade.
+func disableDynamicRecordSizing(c net.Conn) bool {
+	uc, ok := c.(*xreality.UConn)
+	if !ok || uc.UConn == nil || uc.UConn.Conn == nil {
+		return false
+	}
+	f := reflect.ValueOf(uc.UConn.Conn).Elem().FieldByName("config")
+	if !f.IsValid() || f.Type() != reflect.TypeOf((*utls.Config)(nil)) || f.IsNil() {
+		return false
+	}
+	cfg := (*utls.Config)(unsafe.Pointer(f.Pointer()))
+	cfg.DynamicRecordSizingDisabled = true
+	return true
 }
 
 type NativeRealityServerConfig struct {
