@@ -260,10 +260,47 @@ func (t *Tunnel) rekeyTick(st *tunnelRekey, now time.Time) (time.Duration, error
 	timeout := st.cfg.Timeout
 	st.mu.Unlock()
 
-	if err := t.writePacket(PacketRekey, msg); err != nil {
+	if err := t.writeRekeyFrame(msg); err != nil {
 		return 0, err
 	}
 	return timeout, nil
+}
+
+// rekeyFrameSlack is the extra room appendRekeyFrames needs beyond the payload.
+const rekeyFrameSlack = 2*(4+packetHeaderSize+256+TagSize) + hsNoiseMax
+
+// appendRekeyFrames writes a NOISE frame and then the PacketRekey frame with random padding, so
+// the rekey messages do not have a fixed size on the wire. The NOISE frame goes first because
+// RESP and FIN end the sender's epoch: nothing may follow them under the old keys.
+func (t *Tunnel) appendRekeyFrames(dst, payload []byte) (int, error) {
+	pad, noise := handshakePadPlan()
+	n, err := t.appendNoiseFrame(dst, noise)
+	if err != nil {
+		return 0, err
+	}
+	m, err := t.framer.FrameWithPadding(dst[n:], PacketRekey, payload, pad, pad)
+	if err != nil {
+		return 0, err
+	}
+	return n + m, nil
+}
+
+// writeRekeyFrame sends a rekey message that does not switch keys (INIT).
+func (t *Tunnel) writeRekeyFrame(payload []byte) error {
+	t.sendMu.Lock()
+	defer t.sendMu.Unlock()
+	rawBuf := getFrameBuf(len(payload) + rekeyFrameSlack)
+	defer putFrameBuf(rawBuf)
+	n, err := t.appendRekeyFrames(*rawBuf, payload)
+	if err != nil {
+		return err
+	}
+	if err := t.writeFrameLocked((*rawBuf)[:n]); err != nil {
+		t.cancel()
+		return err
+	}
+	t.lastAuthNano.Store(time.Now().UnixNano())
+	return nil
 }
 
 // handleRekey processes one PacketRekey frame on the recvLoop goroutine, so the receive-side
@@ -472,8 +509,8 @@ func (t *Tunnel) commitEpoch(st *tunnelRekey, epoch uint32, next *SessionKeys) {
 // send keys before any other frame can follow, then runs after.
 func (t *Tunnel) sendMarkerAndSwitch(payload []byte, enc *Cipher, headerKey [KeySize]byte, after func()) {
 	t.sendMu.Lock()
-	rawBuf := getFrameBuf(4 + packetHeaderSize + len(payload) + 256 + TagSize)
-	n, err := t.framer.FrameWithBuffer(*rawBuf, PacketRekey, payload)
+	rawBuf := getFrameBuf(len(payload) + rekeyFrameSlack)
+	n, err := t.appendRekeyFrames(*rawBuf, payload)
 	if err == nil {
 		err = t.writeFrameLocked((*rawBuf)[:n])
 	}

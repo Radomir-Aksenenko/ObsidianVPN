@@ -434,3 +434,29 @@ func TestRekeyAnnouncementIsDelayed(t *testing.T) {
 		t.Fatal("announcement came before its earliest moment")
 	}
 }
+
+// Rekey messages must not have a fixed size on the wire: each one carries random padding and a
+// NOISE frame of random size.
+func TestRekeyFramesVaryInSize(t *testing.T) {
+	cli, _ := newTunnelPair(t, nil)
+	payload := make([]byte, rekeyInitLen)
+	buf := make([]byte, len(payload)+rekeyFrameSlack)
+	sizes := map[int]bool{}
+	cli.sendMu.Lock()
+	for i := 0; i < 32; i++ {
+		n, err := cli.appendRekeyFrames(buf, payload)
+		if err != nil {
+			cli.sendMu.Unlock()
+			t.Fatal(err)
+		}
+		if n <= len(payload) {
+			cli.sendMu.Unlock()
+			t.Fatalf("frame of %d bytes is not larger than its %d byte payload", n, len(payload))
+		}
+		sizes[n] = true
+	}
+	cli.sendMu.Unlock()
+	if len(sizes) < 8 {
+		t.Fatalf("only %d distinct sizes in 32 rekey frames", len(sizes))
+	}
+}
