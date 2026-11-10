@@ -462,6 +462,13 @@ func (ch *UDPChannel) RatchetEpoch(keys *UDPKeys) error {
 	return nil
 }
 
+// DropPrevEpoch stops accepting datagrams of the epoch before the last RatchetEpoch.
+func (ch *UDPChannel) DropPrevEpoch() {
+	ch.recvMu.Lock()
+	ch.prevDecAEAD, ch.prevHp, ch.prevTag = nil, nil, [UDPTagSize]byte{}
+	ch.recvMu.Unlock()
+}
+
 func NewUDPChannel(conn *net.UDPConn, keys *UDPKeys) (*UDPChannel, error) {
 	enc, err := chacha20poly1305.New(keys.SendKey[:])
 	if err != nil {
@@ -695,26 +702,27 @@ func (m *UDPMux) SetRouteMaskKey(serverPub [KeySize]byte) {
 }
 
 // findSession resolves a plaintext RouteTag, current or previous epoch.
-func (m *UDPMux) findSession(tag [UDPTagSize]byte) (*UDPSession, bool) {
+// It returns the receive keys the tag matched, taken from one snapshot, so a concurrent epoch
+// change cannot mix the keys of two epochs for one datagram.
+func (m *UDPMux) findSession(tag [UDPTagSize]byte) (*UDPSession, cipher.AEAD, cipher.Block) {
 	if mru := m.mruSession.Load(); mru != nil {
-		if mru.tag == tag {
-			return mru, false
-		}
-		if mru.prevDecAEAD != nil && mru.prevTag == tag {
-			return mru, true
+		if dec, hp := mru.recv.Load().match(tag); dec != nil {
+			return mru, dec, hp
 		}
 	}
 	if sess := m.table.Get(tag); sess != nil {
-		m.mruSession.Store(sess)
-		return sess, sess.tag != tag && sess.prevTag == tag
+		if dec, hp := sess.recv.Load().match(tag); dec != nil {
+			m.mruSession.Store(sess)
+			return sess, dec, hp
+		}
 	}
-	return nil, false
+	return nil, nil, nil
 }
 
 // lookupDatagram finds the session a datagram belongs to, whatever its format, and returns the
 // plaintext tag and where the Obsidian header starts. Junk costs at most one AES block and a
 // few map lookups, no AEAD work.
-func (m *UDPMux) lookupDatagram(pkt, mask []byte) (sess *UDPSession, isPrev bool, tag [UDPTagSize]byte, offset int) {
+func (m *UDPMux) lookupDatagram(pkt, mask []byte) (sess *UDPSession, dec cipher.AEAD, hp cipher.Block, tag [UDPTagSize]byte, offset int) {
 	n := len(pkt)
 	try := func(off int, masked bool) bool {
 		if n-off < UDPHeaderSize+TagSize {
@@ -724,7 +732,7 @@ func (m *UDPMux) lookupDatagram(pkt, mask []byte) (sess *UDPSession, isPrev bool
 		if masked {
 			maskRouteTag(m.routeMask, tag[:], pkt[off+UDPHeaderSize:off+UDPHeaderSize+16], mask)
 		}
-		sess, isPrev = m.findSession(tag)
+		sess, dec, hp = m.findSession(tag)
 		offset = off
 		return sess != nil
 	}
@@ -740,20 +748,38 @@ func (m *UDPMux) lookupDatagram(pkt, mask []byte) (sess *UDPSession, isPrev bool
 	if try(0, false) {
 		return
 	}
-	return nil, false, tag, 0
+	return nil, nil, nil, tag, 0
+}
+
+// udpRecvKeys is the immutable receive state of a server session: the current epoch and, during
+// a rekey, the previous one. It is swapped whole, so the lock-free lookup never sees half of it.
+type udpRecvKeys struct {
+	tag, prevTag [UDPTagSize]byte
+	dec, prevDec cipher.AEAD
+	hp, prevHp   cipher.Block
+}
+
+func (k *udpRecvKeys) match(tag [UDPTagSize]byte) (cipher.AEAD, cipher.Block) {
+	if k.tag == tag {
+		return k.dec, k.hp
+	}
+	if k.prevDec != nil && k.prevTag == tag {
+		return k.prevDec, k.prevHp
+	}
+	return nil, nil
 }
 
 type UDPSession struct {
 	TrafficPadding bool
 	mux            *UDPMux
-	encAEAD        cipher.AEAD
-	decAEAD        cipher.AEAD
-	prevDecAEAD    cipher.AEAD
-	hp             cipher.Block
-	prevHp         cipher.Block
-	tag            [UDPTagSize]byte
-	prevTag        [UDPTagSize]byte
-	maskRoute      bool
+	// Send side, guarded by sendMu. It moves to a new epoch later than the receive side (see
+	// AcceptEpoch and CommitSendEpoch).
+	encAEAD   cipher.AEAD
+	sendHp    cipher.Block
+	sendTag   [UDPTagSize]byte
+	recv      atomic.Pointer[udpRecvKeys]
+	epochMu   sync.Mutex // serializes epoch changes and the table entries they own
+	maskRoute bool
 
 	clientAddr       atomic.Pointer[net.UDPAddr]
 	activeConn       atomic.Pointer[net.UDPConn]
@@ -827,9 +853,8 @@ func (m *UDPMux) RegisterSession(keys *UDPKeys, options ...UDPSessionOptions) (*
 	s := &UDPSession{
 		mux:              m,
 		encAEAD:          enc,
-		decAEAD:          dec,
-		hp:               hp,
-		tag:              keys.SessionTag,
+		sendHp:           hp,
+		sendTag:          keys.SessionTag,
 		EnableSTUN:       true,
 		EnableSRTP:       true,
 		ssrc:             mathrand.Uint32(),
@@ -840,6 +865,7 @@ func (m *UDPMux) RegisterSession(keys *UDPKeys, options ...UDPSessionOptions) (*
 		dataIn:           make(chan []byte, udpSessionQueueSize),
 		done:             make(chan struct{}),
 	}
+	s.recv.Store(&udpRecvKeys{tag: keys.SessionTag, dec: dec, hp: hp})
 	s.rtpSeq.Store(uint32(mathrand.Uint32() & 0xFFFF))
 	s.rtpTS.Store(mathrand.Uint32())
 	s.activeConn.Store(m.conn)
@@ -859,7 +885,7 @@ func (m *UDPMux) RegisterSession(keys *UDPKeys, options ...UDPSessionOptions) (*
 		}
 	}
 
-	m.table.Set(s.tag, s)
+	m.table.Set(keys.SessionTag, s)
 	m.mruSession.Store(s)
 	return s, nil
 }
@@ -880,17 +906,27 @@ func (s *UDPSession) UseMaskedFormat() bool {
 
 func (m *UDPMux) UnregisterSession(tag [UDPTagSize]byte) {
 	m.table.Delete(tag)
-	if mru := m.mruSession.Load(); mru != nil && mru.tag == tag {
-		m.mruSession.Store(nil)
+	if mru := m.mruSession.Load(); mru != nil {
+		if rk := mru.recv.Load(); rk.tag == tag || rk.prevTag == tag {
+			m.mruSession.Store(nil)
+		}
 	}
 }
 
-// RatchetEpoch seamlessly updates session keys for in-tunnel epoch rekeying.
-func (s *UDPSession) RatchetEpoch(keys *UDPKeys) error {
-	enc, err := chacha20poly1305.New(keys.SendKey[:])
-	if err != nil {
-		return err
+// unregisterOwn removes tag from the table only while it still points at s.
+func (m *UDPMux) unregisterOwn(tag [UDPTagSize]byte, s *UDPSession) {
+	if tag == ([UDPTagSize]byte{}) {
+		return
 	}
+	if m.table.Get(tag) == s {
+		m.table.Delete(tag)
+	}
+}
+
+// AcceptEpoch starts accepting datagrams of a new epoch while still accepting the current one,
+// which becomes the previous epoch. Sending is unchanged until CommitSendEpoch, so a client that
+// has not switched yet keeps getting datagrams it can open. An older previous epoch is dropped.
+func (s *UDPSession) AcceptEpoch(keys *UDPKeys) error {
 	dec, err := chacha20poly1305.New(keys.RecvKey[:])
 	if err != nil {
 		return err
@@ -899,25 +935,58 @@ func (s *UDPSession) RatchetEpoch(keys *UDPKeys) error {
 	if err != nil {
 		return err
 	}
-
-	s.sendMu.Lock()
-	s.encAEAD = enc
-	oldHp := s.hp
-	s.hp = hp
-	oldTag := s.tag
-	s.tag = keys.SessionTag
-	s.sendMu.Unlock()
-
-	s.recvMu.Lock()
-	s.prevDecAEAD = s.decAEAD
-	s.decAEAD = dec
-	s.prevHp = oldHp
-	s.prevTag = oldTag
-	s.recvMu.Unlock()
-
-	// Register new tag in session table while preserving old tag for transition window
-	s.mux.table.Set(s.tag, s)
+	s.epochMu.Lock()
+	defer s.epochMu.Unlock()
+	cur := s.recv.Load()
+	if cur.prevDec != nil && cur.prevTag != cur.tag {
+		s.mux.unregisterOwn(cur.prevTag, s)
+	}
+	s.recv.Store(&udpRecvKeys{
+		tag: keys.SessionTag, dec: dec, hp: hp,
+		prevTag: cur.tag, prevDec: cur.dec, prevHp: cur.hp,
+	})
+	s.mux.table.Set(keys.SessionTag, s)
 	return nil
+}
+
+// CommitSendEpoch makes the session send with the new epoch's keys and tag.
+func (s *UDPSession) CommitSendEpoch(keys *UDPKeys) error {
+	enc, err := chacha20poly1305.New(keys.SendKey[:])
+	if err != nil {
+		return err
+	}
+	hp, err := aes.NewCipher(keys.HeaderKey[:])
+	if err != nil {
+		return err
+	}
+	s.sendMu.Lock()
+	s.encAEAD, s.sendHp, s.sendTag = enc, hp, keys.SessionTag
+	s.sendMu.Unlock()
+	return nil
+}
+
+// DropPrevEpoch stops accepting the previous epoch once datagrams in flight have arrived, so
+// keys from before a rekey cannot be used to inject datagrams later.
+func (s *UDPSession) DropPrevEpoch() {
+	s.epochMu.Lock()
+	defer s.epochMu.Unlock()
+	cur := s.recv.Load()
+	if cur.prevDec == nil {
+		return
+	}
+	if cur.prevTag != cur.tag {
+		s.mux.unregisterOwn(cur.prevTag, s)
+	}
+	s.recv.Store(&udpRecvKeys{tag: cur.tag, dec: cur.dec, hp: cur.hp})
+}
+
+// RatchetEpoch switches receiving and sending to new keys at once, keeping the previous epoch
+// acceptable until DropPrevEpoch.
+func (s *UDPSession) RatchetEpoch(keys *UDPKeys) error {
+	if err := s.AcceptEpoch(keys); err != nil {
+		return err
+	}
+	return s.CommitSendEpoch(keys)
 }
 
 // pktPool reduces GC pressure — each decrypted packet is pooled.
@@ -974,30 +1043,12 @@ func (m *UDPMux) runOnConn(conn *net.UDPConn) {
 			return
 		}
 		// O(1) session lookup; unknown datagrams are dropped without any AEAD work.
-		foundSess, isPrevTag, tag, offset := m.lookupDatagram(buf[:n], mask)
-		if foundSess == nil {
+		foundSess, dec, hp, tag, offset := m.lookupDatagram(buf[:n], mask)
+		if foundSess == nil || dec == nil || hp == nil {
 			continue
 		}
 		packetData := buf[offset:n]
 		sample := packetData[UDPHeaderSize : UDPHeaderSize+16]
-
-		// Select cipher and counter protection key based on epoch
-		foundSess.recvMu.Lock()
-		dec := foundSess.decAEAD
-		hp := foundSess.hp
-		if isPrevTag {
-			if foundSess.prevDecAEAD != nil {
-				dec = foundSess.prevDecAEAD
-			}
-			if foundSess.prevHp != nil {
-				hp = foundSess.prevHp
-			}
-		}
-		foundSess.recvMu.Unlock()
-
-		if dec == nil || hp == nil {
-			continue
-		}
 
 		// 3. Unmask counter: XOR 8-byte counter with AES(ciphertext sample)
 		copy(ctrBuf, packetData[UDPTagSize:UDPHeaderSize])
@@ -1141,7 +1192,7 @@ func (s *UDPSession) sealDatagram(buf, payload []byte) int {
 	}
 
 	// 1. Plaintext header (RouteTag 4B + Counter 8B)
-	copy(buf[headerOffset:headerOffset+UDPTagSize], s.tag[:])
+	copy(buf[headerOffset:headerOffset+UDPTagSize], s.sendTag[:])
 	binary.BigEndian.PutUint64(buf[headerOffset+UDPTagSize:headerOffset+UDPHeaderSize], ctr)
 
 	// The datagram never reaches the last udpScratchLen bytes of buf (see maxSessionDatagram).
@@ -1152,7 +1203,7 @@ func (s *UDPSession) sealDatagram(buf, payload []byte) int {
 	sealed := s.encAEAD.Seal(buf[headerOffset+UDPHeaderSize:headerOffset+UDPHeaderSize], nonce, plainPayload, buf[headerOffset:headerOffset+UDPHeaderSize])
 
 	// 3. Counter protection: XOR counter with AES(ciphertext sample)
-	protectCounterWith(s.hp, buf[headerOffset+UDPTagSize:headerOffset+UDPHeaderSize], buf[headerOffset+UDPHeaderSize:headerOffset+UDPHeaderSize+16], mask)
+	protectCounterWith(s.sendHp, buf[headerOffset+UDPTagSize:headerOffset+UDPHeaderSize], buf[headerOffset+UDPHeaderSize:headerOffset+UDPHeaderSize+16], mask)
 	if s.maskRoute {
 		maskRouteTag(s.mux.routeMask, buf[headerOffset:headerOffset+UDPTagSize], buf[headerOffset+UDPHeaderSize:headerOffset+UDPHeaderSize+16], mask)
 	}
@@ -1331,10 +1382,13 @@ func (s *UDPSession) RecvBatch(dst []UDPPacket) (int, error) {
 
 func (s *UDPSession) Close() {
 	s.closeOnce.Do(func() {
-		s.mux.UnregisterSession(s.tag)
-		if s.prevTag != [UDPTagSize]byte{} {
-			s.mux.UnregisterSession(s.prevTag)
+		s.epochMu.Lock()
+		rk := s.recv.Load()
+		s.mux.UnregisterSession(rk.tag)
+		if rk.prevDec != nil {
+			s.mux.UnregisterSession(rk.prevTag)
 		}
+		s.epochMu.Unlock()
 		select {
 		case <-s.done:
 		default:
