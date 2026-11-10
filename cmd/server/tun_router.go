@@ -140,6 +140,7 @@ func (r *tunRouter) runBatch(br tunBatchReader) {
 		bufs[i] = make([]byte, 4096) // GSO segments are at most the link MTU
 	}
 	sizes := make([]int, len(bufs))
+	var pend routedPending
 	for {
 		n, err := br.ReadBatch(bufs, sizes)
 		if err != nil {
@@ -147,13 +148,49 @@ func (r *tunRouter) runBatch(br tunBatchReader) {
 			return
 		}
 		for i := 0; i < n; i++ {
-			r.route(bufs[i][:sizes[i]])
+			r.routeTo(bufs[i][:sizes[i]], &pend)
 		}
+		// Queue the read's segments back to back: the session writer then finds them together
+		// and sends them as one batch (one write, larger records) instead of the first alone
+		// while the rest are still being routed.
+		pend.flush()
+	}
+}
+
+// routedPending holds the packets of one TUN read until all of them are routed.
+type routedPending struct {
+	sess []*routedSession
+	bufs [][]byte
+}
+
+func (p *routedPending) add(s *routedSession, b []byte) {
+	p.sess = append(p.sess, s)
+	p.bufs = append(p.bufs, b)
+}
+
+func (p *routedPending) flush() {
+	for i, s := range p.sess {
+		s.enqueueOrDrop(p.bufs[i])
+		p.sess[i], p.bufs[i] = nil, nil
+	}
+	p.sess, p.bufs = p.sess[:0], p.bufs[:0]
+}
+
+func (s *routedSession) enqueueOrDrop(b []byte) {
+	if !s.enqueue(b) {
+		if dropLog.Ready() {
+			log.Printf("session %s: outbound queue full, dropping packet len=%d", s.sid, len(b))
+		}
+		putRoutedPacket(b)
 	}
 }
 
 // route queues one downlink packet read from the TUN for its session.
-func (r *tunRouter) route(packet []byte) {
+func (r *tunRouter) route(packet []byte) { r.routeTo(packet, nil) }
+
+// routeTo prepares one downlink packet for its session and queues it, or adds it to pend when
+// pend is not nil.
+func (r *tunRouter) routeTo(packet []byte, pend *routedPending) {
 	n := len(packet)
 	sess := r.sessionForPacket(packet)
 	if sess == nil {
@@ -164,32 +201,30 @@ func (r *tunRouter) route(packet []byte) {
 		limit := int(sess.mtu.Load())
 		clampDownlinkSYN(packet, limit)
 		if n > limit {
-			sendOversized(sess, packet, limit)
+			sendOversized(sess, packet, limit, pend)
 			return
 		}
 	}
 
 	copyPacket := getRoutedPacket(n)
 	copy(copyPacket, packet)
-	if !sess.enqueue(copyPacket) {
-		if dropLog.Ready() {
-			log.Printf("session %s: outbound queue full, dropping packet len=%d", sess.sid, len(copyPacket))
-		}
-		putRoutedPacket(copyPacket)
+	if pend != nil {
+		pend.add(sess, copyPacket)
+		return
 	}
+	sess.enqueueOrDrop(copyPacket)
 }
 
 // sendOversized queues a downlink packet larger than limit as several packets that fit it.
-func sendOversized(sess *routedSession, packet []byte, limit int) {
+func sendOversized(sess *routedSession, packet []byte, limit int, pend *routedPending) {
 	emit := func(p []byte) {
 		cp := getRoutedPacket(len(p))
 		copy(cp, p)
-		if !sess.enqueue(cp) {
-			if dropLog.Ready() {
-				log.Printf("session %s: outbound queue full, dropping packet len=%d", sess.sid, len(cp))
-			}
-			putRoutedPacket(cp)
+		if pend != nil {
+			pend.add(sess, cp)
+			return
 		}
+		sess.enqueueOrDrop(cp)
 	}
 	if splitTCP(packet, limit, emit) || fragmentIPv4(packet, limit, emit) {
 		return
