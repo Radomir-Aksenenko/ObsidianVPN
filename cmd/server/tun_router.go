@@ -87,8 +87,11 @@ type routedSession struct {
 	prio       chan routedPacket
 	// prioRun counts latency-sensitive sends since the last bulk send. writeLoop only.
 	prioRun int
-	done    chan struct{}
-	once    sync.Once
+	// ackRun and ackTimer are writeLoop's scratch state for holding ACK-only runs.
+	ackRun   [routedBatchSize]routedPacket
+	ackTimer *time.Timer
+	done     chan struct{}
+	once     sync.Once
 }
 
 func newTunRouter(tun io.ReadWriter) *tunRouter {
@@ -337,6 +340,10 @@ func (s *routedSession) writeLoop() {
 		select {
 		case p := <-s.prio:
 			s.prioRun++
+			if _, _, ack := obsidian.PureACK(p.buf); ack && downlinkACKHold > 0 {
+				s.sendACKRun(p, batch[:])
+				continue
+			}
 			s.sendOne(p, time.Now())
 		case p := <-s.out:
 			s.sendBulk(p, batch[:])
@@ -410,6 +417,81 @@ func (s *routedSession) sendPrioWaiting() {
 		default:
 			return
 		}
+	}
+}
+
+// downlinkACKHold is how long a run of pure TCP ACKs on the latency lane may wait for more
+// before it goes to the client. During an upload the internet side acknowledges every second
+// segment and each ACK used to leave as its own encrypted record, a stream of small server
+// records an HTTPS upload does not have. Held ACKs are thinned to one per connection
+// (obsidian.ThinACKs). Any other packet ends the wait at once. It mirrors client.ACKHold.
+var downlinkACKHold = 4 * time.Millisecond
+
+// sendACKRun collects pure ACKs that follow first on the latency lane for up to
+// downlinkACKHold, sends the newest per connection, then sends whatever packet ended the run.
+func (s *routedSession) sendACKRun(first routedPacket, bulk []routedPacket) {
+	run := append(s.ackRun[:0], first)
+	if s.ackTimer == nil {
+		s.ackTimer = time.NewTimer(downlinkACKHold)
+	} else {
+		s.ackTimer.Reset(downlinkACKHold)
+	}
+	var next routedPacket
+	nextBulk := false
+collect:
+	for len(run) < len(s.ackRun) {
+		select {
+		case p := <-s.prio:
+			if _, _, ack := obsidian.PureACK(p.buf); ack {
+				run = append(run, p)
+				continue
+			}
+			next = p
+			break collect
+		case p := <-s.out:
+			next, nextBulk = p, true
+			break collect
+		case <-s.ackTimer.C:
+			break collect
+		case <-s.done:
+			break collect
+		}
+	}
+	s.ackTimer.Stop()
+	s.flushACKs(run)
+	clear(s.ackRun[:])
+	switch {
+	case next.buf == nil:
+	case nextBulk:
+		s.prioRun = 0
+		s.sendBulk(next, bulk)
+	default:
+		s.prioRun++
+		s.sendOne(next, time.Now())
+	}
+}
+
+// flushACKs sends the newest ACK per connection of run and returns every buffer to the pool.
+func (s *routedSession) flushACKs(run []routedPacket) {
+	bufs := s.batchBufs[:0]
+	for _, p := range run {
+		bufs = append(bufs, p.buf)
+	}
+	keep := obsidian.ThinACKs(bufs)
+	if f := s.sendBatch.Load(); f != nil && len(keep) > 1 {
+		if sent, err := (*f)(keep); err != nil && dropLog.Ready() {
+			log.Printf("session %s: ACK batch to client dropped %d of %d packets: %v", s.sid, len(keep)-sent, len(keep), err)
+		}
+	} else {
+		for _, b := range keep {
+			if err := s.send(b); err != nil && dropLog.Ready() {
+				log.Printf("session %s: send to client dropped packet len=%d: %v", s.sid, len(b), err)
+			}
+		}
+	}
+	clear(s.batchBufs[:])
+	for _, p := range run {
+		putRoutedPacket(p.buf)
 	}
 }
 
