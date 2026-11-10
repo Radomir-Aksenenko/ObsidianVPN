@@ -14,3 +14,13 @@ Exact module versions and checksums are recorded in `go.mod` / `go.sum`.
 Redistributions must retain the applicable notices and satisfy the linked
 licenses, including source availability for MPL-covered files. These notices
 supplement the obligations for the other existing Go dependencies.
+
+# Server TUN offloads
+
+On Linux the server opens its TUN with segmentation offloads through the `tun` package of
+wireguard-go (GSO split on read, GRO merge on write). The module is linked unmodified.
+
+| Component | Pinned revision | License / source |
+| --- | --- | --- |
+| wireguard-go | `f333402bd9cb` | [MIT](licenses/wireguard-go-MIT.txt), [source](https://git.zx2c4.com/wireguard-go/tree/?id=f333402bd9cb) |
+
