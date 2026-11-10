@@ -105,7 +105,7 @@ type tunnelRekey struct {
 	keys       *SessionKeys
 	epoch      uint32
 	lastCommit time.Time
-	nextAt      time.Time
+	nextAt     time.Time
 	// client: the INIT in flight
 	pendEph  *Keypair
 	pendKEM  *MLKEMKeypair

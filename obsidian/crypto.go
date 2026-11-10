@@ -10,10 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	randv2 "math/rand/v2"
 	"net"
 	"sync/atomic"
 	"time"
-	randv2 "math/rand/v2"
 
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/curve25519"

@@ -273,7 +273,7 @@ type Tunnel struct {
 	epochStartPackets atomic.Uint64
 	rekey             atomic.Pointer[tunnelRekey]
 	peerRekeyCapable  atomic.Bool
-	hsBudget         handshakePadBudget // guarded by sendMu
+	hsBudget          handshakePadBudget // guarded by sendMu
 
 	ctx    context.Context
 	cancel context.CancelFunc

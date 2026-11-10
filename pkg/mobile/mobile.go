@@ -59,11 +59,11 @@ type activeSessionHolder struct {
 }
 
 var (
-	sessionMu       sync.RWMutex
-	activeSessions  = make(map[string]*activeSessionHolder)
-	globalProxyMu   sync.Mutex
-	activeSocks5    *client.Socks5Proxy
-	nextSessionID   int
+	sessionMu      sync.RWMutex
+	activeSessions = make(map[string]*activeSessionHolder)
+	globalProxyMu  sync.Mutex
+	activeSocks5   *client.Socks5Proxy
+	nextSessionID  int
 )
 
 // StartTunnelWithFd initializes and starts an Obsidian VPN tunnel using an OS-provided TUN file descriptor.

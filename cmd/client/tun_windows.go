@@ -41,7 +41,7 @@ type wintunAdapter struct {
 }
 
 const (
-	defaultTunMTU     = 1420
+	defaultTunMTU      = 1420
 	udpSafeTunMTU      = 1420
 	mobileSafeTunMTU   = 1360
 	minAutoTunMTU      = 1280
