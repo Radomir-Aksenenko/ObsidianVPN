@@ -808,7 +808,7 @@ func (s *Session) copyTunToData(tun io.ReadWriter, ch *obsidian.UDPChannel, tunn
 				}
 			}
 		}
-		viaTCP = ThinACKs(viaTCP)
+		viaTCP = obsidian.ThinACKs(viaTCP)
 		if len(viaTCP) > 0 {
 			if _, err := tunnel.SendDataBatch(viaTCP); err != nil && !isTemporaryNetworkError(err) {
 				select {
@@ -879,7 +879,7 @@ func (s *Session) copyTunToTunnel(tun io.ReadWriter, tunnel *obsidian.Tunnel) er
 			}
 			pkts = append(pkts, packet)
 		}
-		pkts = ThinACKs(pkts)
+		pkts = obsidian.ThinACKs(pkts)
 		if len(pkts) > 0 {
 			if _, err := tunnel.SendDataBatch(pkts); err != nil {
 				reader.Release(batch)

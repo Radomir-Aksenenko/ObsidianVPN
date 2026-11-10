@@ -81,7 +81,7 @@ obsidian() { # version mode
   sleep 0.5
   local t0=$(date +%s%N)
   # Not through ns(): a backgrounded shell function would give the subshell's pid.
-  ip netns exec cli env CAPH_TUN=ctun ${CAPH_CPUPROFILE:+CAPH_CPUPROFILE=$RES/$name.cpu.pprof} "$OUT/caph-$v" "$RES/$name.cli.json" > "$RES/$name.client.log" 2>&1 &
+  ip netns exec cli env CAPH_TUN=ctun ${CAPH_CPUPROFILE:+CAPH_CPUPROFILE=$RES/$name.cpu.pprof} ${CAPH_ACK_HOLD_MS:+CAPH_ACK_HOLD_MS=$CAPH_ACK_HOLD_MS} "$OUT/caph-$v" "$RES/$name.cli.json" > "$RES/$name.client.log" 2>&1 &
   local cpid=$!
   for _ in $(seq 1 200); do grep -q "PHASE connected" "$RES/$name.client.log" && break; sleep 0.05; done
   local t1=$(date +%s%N)

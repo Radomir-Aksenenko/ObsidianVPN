@@ -1,4 +1,4 @@
-package client
+package obsidian
 
 import (
 	"encoding/binary"

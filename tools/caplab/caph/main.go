@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/pprof"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -120,6 +121,13 @@ func main() {
 	var cfg obsidian.ClientConfig
 	if err := json.Unmarshal(f, &cfg); err != nil {
 		log.Fatal(err)
+	}
+	if ms := os.Getenv("CAPH_ACK_HOLD_MS"); ms != "" {
+		v, err := strconv.ParseFloat(ms, 64)
+		if err != nil {
+			log.Fatal(err)
+		}
+		client.ACKHold = time.Duration(v * float64(time.Millisecond))
 	}
 	s, err := client.NewSession(&cfg, client.WithAutoReconnect(false),
 		client.WithStatusCallback(func(st, detail string) { log.Printf("status %s: %s", st, detail) }))

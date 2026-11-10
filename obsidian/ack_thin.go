@@ -1,8 +1,9 @@
-package client
+package obsidian
 
 import "encoding/binary"
 
-// ACK thinning. During a download every inner TCP ACK the client stack emits becomes its own
+// ACK thinning. During a download every inner TCP ACK the client stack emits (during an upload,
+// every ACK the server side receives from the internet) becomes its own
 // encrypted frame: hundreds of small uplink records per downloaded megabyte, a pattern a plain
 // HTTPS download does not have, and frames that cost CPU and bytes. When several ACKs of one
 // connection wait in the same uplink batch, only the newest carries information the sender still
@@ -19,9 +20,9 @@ type ackFlow struct {
 	key [36]byte // src addr, dst addr, src port, dst port
 }
 
-// pureACK reports whether pkt is a TCP segment that only acknowledges, and returns its flow and
+// PureACK reports whether pkt is a TCP segment that only acknowledges, and returns its flow and
 // acknowledgment number.
-func pureACK(pkt []byte) (ackFlow, uint32, bool) {
+func PureACK(pkt []byte) (ackFlow, uint32, bool) {
 	var f ackFlow
 	var l4 []byte
 	switch {
@@ -72,26 +73,29 @@ func pureACK(pkt []byte) (ackFlow, uint32, bool) {
 	return f, binary.BigEndian.Uint32(l4[8:12]), true
 }
 
+// ackThinMax bounds the batch ThinACKs looks at; longer batches are left as they are.
+const ackThinMax = 64
+
 // ackAfter reports whether a is a later acknowledgment number than b (RFC 1982 serial order).
 func ackAfter(a, b uint32) bool { return int32(a-b) > 0 }
 
 // ThinACKs removes superseded pure ACKs from pkts in place, keeping the order of the rest, and
 // returns the shortened slice.
 func ThinACKs(pkts [][]byte) [][]byte {
-	if len(pkts) < 2 {
+	if len(pkts) < 2 || len(pkts) > ackThinMax {
 		return pkts
 	}
 	// Newest ack number seen later in the batch, per flow. Batches hold at most
-	// UplinkBatchPackets packets, so a linear scan of a stack array beats a map.
+	// ackThinMax packets, so a linear scan of a stack array beats a map.
 	type seen struct {
 		flow ackFlow
 		ack  uint32
 	}
-	var buf [UplinkBatchPackets]seen
+	var buf [ackThinMax]seen
 	newest := buf[:0]
 	drop := 0
 	for i := len(pkts) - 1; i >= 0; i-- {
-		flow, ack, ok := pureACK(pkts[i])
+		flow, ack, ok := PureACK(pkts[i])
 		if !ok {
 			continue
 		}
