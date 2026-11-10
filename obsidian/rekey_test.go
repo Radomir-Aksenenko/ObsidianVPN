@@ -20,7 +20,7 @@ func testSessionKeys(t *testing.T) *SessionKeys {
 	return sk
 }
 
-var fastRekey = RekeyConfig{Interval: 40 * time.Millisecond, Timeout: 2 * time.Second, Grace: 20 * time.Millisecond, MinInterval: time.Millisecond}
+var fastRekey = RekeyConfig{Interval: 40 * time.Millisecond, Timeout: 2 * time.Second, Grace: 20 * time.Millisecond, MinInterval: time.Millisecond, AnnounceWithin: 30 * time.Millisecond}
 
 // streamUntil sends numbered DATA packets from src until stop closes and checks on dst that
 // every one arrives, in order. It returns how many were checked.
@@ -404,5 +404,33 @@ func recvWithTimeout(s *UDPSession) ([]byte, error) {
 		return r.b, r.err
 	case <-time.After(2 * time.Second):
 		return nil, context.DeadlineExceeded
+	}
+}
+
+// The announcement goes out at a random moment, not right after the handshake, and a client that
+// enables rekey before it arrives still picks it up.
+func TestRekeyAnnouncementIsDelayed(t *testing.T) {
+	client, server := newTunnelPair(t, nil)
+	if err := client.EnableRekey(testSessionKeys(t), true, fastRekey, RekeyHooks{}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := fastRekey
+	cfg.AnnounceWithin = 300 * time.Millisecond
+	start := time.Now()
+	if err := server.EnableRekey(testSessionKeys(t), false, cfg, RekeyHooks{}); err != nil {
+		t.Fatal(err)
+	}
+	if client.peerRekeyCapable.Load() {
+		t.Fatal("announcement was sent synchronously")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for client.RekeyEpoch() == 0 && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if client.RekeyEpoch() == 0 {
+		t.Fatal("client never rekeyed after a late announcement")
+	}
+	if time.Since(start) < cfg.AnnounceWithin/30 {
+		t.Fatal("announcement came before its earliest moment")
 	}
 }

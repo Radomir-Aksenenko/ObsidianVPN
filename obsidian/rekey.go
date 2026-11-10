@@ -59,6 +59,10 @@ type RekeyConfig struct {
 	Grace time.Duration
 	// MinInterval is the shortest time between rekeys the server accepts. Default 30 s.
 	MinInterval time.Duration
+	// AnnounceWithin bounds when the server announces support: at a random moment between
+	// 1/30 of it and all of it after the session starts, so no extra record sits at a fixed
+	// position right after the handshake. Default 5 minutes, well before the first rekey.
+	AnnounceWithin time.Duration
 }
 
 func (c RekeyConfig) withDefaults() RekeyConfig {
@@ -73,6 +77,9 @@ func (c RekeyConfig) withDefaults() RekeyConfig {
 	}
 	if c.MinInterval <= 0 {
 		c.MinInterval = 30 * time.Second
+	}
+	if c.AnnounceWithin <= 0 {
+		c.AnnounceWithin = 5 * time.Minute
 	}
 	return c
 }
@@ -104,6 +111,8 @@ type tunnelRekey struct {
 	pendKEM  *MLKEMKeypair
 	pendInit []byte
 	pendAt   time.Time
+	// client: RESP processed, FIN not written yet; no new INIT until it is
+	finPending bool
 	// server: keys sent in RESP, waiting for FIN
 	next *SessionKeys
 	// kick wakes the client loop when a rekey completes, so it schedules the next one at once.
@@ -130,7 +139,19 @@ func (t *Tunnel) EnableRekey(keys *SessionKeys, isClient bool, cfg RekeyConfig, 
 		go t.rekeyLoop(st)
 		return nil
 	}
-	return t.writePacket(PacketNoise, rekeyCapPayload())
+	span := int64(st.cfg.AnnounceWithin - st.cfg.AnnounceWithin/30)
+	delay := st.cfg.AnnounceWithin/30 + time.Duration(rand.Int64N(span+1))
+	time.AfterFunc(delay, func() {
+		select {
+		case <-t.ctx.Done():
+			return
+		default:
+		}
+		if err := t.writePacket(PacketNoise, rekeyCapPayload()); err != nil {
+			t.cancel()
+		}
+	})
+	return nil
 }
 
 // RekeyEpoch reports how many rekeys this tunnel has completed.
@@ -205,6 +226,10 @@ func (t *Tunnel) rekeyTick(st *tunnelRekey, now time.Time) (time.Duration, error
 			return 0, fmt.Errorf("no answer to rekey after %s", waited.Round(time.Second))
 		}
 		return st.cfg.Timeout - waited, nil
+	}
+	if st.finPending {
+		st.mu.Unlock()
+		return st.cfg.Timeout, nil // the FIN writer kicks the loop when done
 	}
 	if now.Before(st.nextAt) {
 		d := st.nextAt.Sub(now)
@@ -366,16 +391,21 @@ func (t *Tunnel) handleRekeyResp(st *tunnelRekey, epoch uint32, msg []byte) erro
 	// Every frame after RESP is sealed with the server's new keys.
 	t.framer.setDecKeys(dec, serverHeader)
 	st.keys.Zero()
-	st.keys, st.epoch = next, epoch
+	st.keys, st.epoch, st.finPending = next, epoch, true
 	t.startEpoch(st)
 	st.mu.Unlock()
-	select {
-	case st.kick <- struct{}{}:
-	default:
-	}
 
 	fin := binary.BigEndian.AppendUint32([]byte{rekeyMsgFin}, epoch)
-	go t.sendMarkerAndSwitch(fin, enc, clientHeader, func() { t.commitEpoch(st, next) })
+	go t.sendMarkerAndSwitch(fin, enc, clientHeader, func() {
+		st.mu.Lock()
+		st.finPending = false
+		st.mu.Unlock()
+		t.commitEpoch(st, epoch, next)
+		select {
+		case st.kick <- struct{}{}:
+		default:
+		}
+	})
 	return nil
 }
 
@@ -398,7 +428,7 @@ func (t *Tunnel) handleRekeyFin(st *tunnelRekey, epoch uint32) error {
 	st.keys, st.epoch, st.next = next, epoch, nil
 	t.startEpoch(st)
 	st.mu.Unlock()
-	t.commitEpoch(st, next)
+	t.commitEpoch(st, epoch, next)
 	return nil
 }
 
@@ -411,8 +441,9 @@ func (t *Tunnel) startEpoch(st *tunnelRekey) {
 	t.epochStartPackets.Store(t.packetCount.Load())
 }
 
-// commitEpoch runs the Commit hook and schedules DropPrev.
-func (t *Tunnel) commitEpoch(st *tunnelRekey, next *SessionKeys) {
+// commitEpoch runs the Commit hook and schedules DropPrev. A drop scheduled for an epoch that a
+// later rekey has already replaced is skipped: by then the previous epoch is a different one.
+func (t *Tunnel) commitEpoch(st *tunnelRekey, epoch uint32, next *SessionKeys) {
 	if st.hooks.Commit != nil {
 		if err := st.hooks.Commit(next); err != nil {
 			log.Printf("tunnel rekey commit: %v", err)
@@ -424,7 +455,13 @@ func (t *Tunnel) commitEpoch(st *tunnelRekey, next *SessionKeys) {
 		time.AfterFunc(st.cfg.Grace, func() {
 			select {
 			case <-t.ctx.Done():
+				return
 			default:
+			}
+			st.mu.Lock()
+			current := st.epoch == epoch && st.next == nil
+			st.mu.Unlock()
+			if current {
 				st.hooks.DropPrev()
 			}
 		})

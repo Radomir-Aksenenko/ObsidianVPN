@@ -444,20 +444,14 @@ func (ch *UDPChannel) RatchetEpoch(keys *UDPKeys) error {
 		return err
 	}
 
+	// Send and Recv both read hp and tag, so both locks are held for the whole switch (same order
+	// as UseMaskedFormat). Recv never sees a new tag with the old decryption keys.
 	ch.sendMu.Lock()
-	ch.encAEAD = enc
-	oldHp := ch.hp
-	ch.hp = hp
-	oldTag := ch.tag
-	ch.tag = keys.SessionTag
-	ch.sendMu.Unlock()
-
 	ch.recvMu.Lock()
-	ch.prevDecAEAD = ch.decAEAD
-	ch.decAEAD = dec
-	ch.prevHp = oldHp
-	ch.prevTag = oldTag
+	ch.prevDecAEAD, ch.prevHp, ch.prevTag = ch.decAEAD, ch.hp, ch.tag
+	ch.encAEAD, ch.decAEAD, ch.hp, ch.tag = enc, dec, hp, keys.SessionTag
 	ch.recvMu.Unlock()
+	ch.sendMu.Unlock()
 
 	return nil
 }
