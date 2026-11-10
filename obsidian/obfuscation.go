@@ -339,8 +339,33 @@ func NewTunnel(conn net.Conn, framer *StreamFramer, cfg TunnelConfig) *Tunnel {
 }
 
 // SendData отправляет IP пакет через туннель.
+// smallWritePadLimit and smallWritePadMax: when a write carries only packets of at most
+// smallWritePadLimit bytes and the profile adds no DATA padding, its last frame gets random
+// padding below smallWritePadMax. Without it such a record has the exact size of the inner
+// packets: every lone pure TCP ACK made a 97-byte TLS record, three quarters of the reverse
+// direction of a download. Writes that carry a bulk packet are left alone; a small frame inside
+// a 16 KB record is invisible anyway, and padding it would only cost bytes. Receivers strip
+// padding the same way for every frame, old ones included.
+const (
+	smallWritePadLimit = 200
+	smallWritePadMax   = 97
+)
+
+// smallWritePad reports whether a write of packets gets small-write padding.
+func (t *Tunnel) smallWritePad(packets [][]byte) bool {
+	if t.framer.PaddingCfg.DataMax > 0 || t.framer.PaddingCfg.UseBucketPadding {
+		return false
+	}
+	for _, p := range packets {
+		if len(p) > smallWritePadLimit {
+			return false
+		}
+	}
+	return true
+}
+
 func (t *Tunnel) SendData(payload []byte) error {
-	if t.hsPad && LooksLikeTLSHandshake(payload) {
+	if (t.hsPad && LooksLikeTLSHandshake(payload)) || t.smallWritePad([][]byte{payload}) {
 		_, err := t.SendDataBatch([][]byte{payload})
 		return err
 	}
@@ -376,7 +401,8 @@ func (t *Tunnel) SendDataBatch(packets [][]byte) (int, error) {
 	}
 	defer func() { t.batchBuf = buf[:0] }()
 
-	for _, p := range packets {
+	smallPad := t.smallWritePad(packets)
+	for i, p := range packets {
 		if t.sessionExpired(t.packetCount.Add(1)) {
 			t.cancel()
 			if err := flush(); err != nil {
@@ -394,6 +420,9 @@ func (t *Tunnel) SendDataBatch(packets [][]byte) (int, error) {
 				pad, noise = 0, 0
 			}
 		}
+		if pad == 0 && smallPad && i == len(packets)-1 {
+			pad = rand.IntN(smallWritePadMax)
+		}
 		if len(buf) > 0 && len(buf)+need > tunnelBatchLimit {
 			if err := flush(); err != nil {
 				return sent, err
@@ -408,7 +437,7 @@ func (t *Tunnel) SendDataBatch(packets [][]byte) (int, error) {
 		var err error
 		if pad > 0 {
 			n, err = t.framer.FrameWithPadding(buf[len(buf):len(buf)+need], PacketData, p, pad, pad)
-			if err == nil {
+			if err == nil && noise > 0 {
 				var m int
 				m, err = t.appendNoiseFrame(buf[len(buf)+n:len(buf)+need], noise)
 				n += m

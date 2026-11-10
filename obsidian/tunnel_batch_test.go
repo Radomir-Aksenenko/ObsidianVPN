@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 )
@@ -257,37 +258,68 @@ func BenchmarkTunnelRoundTrip(b *testing.B) {
 	b.Run("native", func(b *testing.B) { run(b, "native") })
 }
 
-// Small DATA frames must not carry the exact size of the inner packet; bulk frames keep theirs.
-func TestSmallDataFramesArePadded(t *testing.T) {
-	mk := func(k byte) *Cipher {
-		c, err := NewCipher([KeySize]byte{k}, [NonceSize]byte{k})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return c
+// writeSizes records the size of every write and discards the data.
+type writeSizes struct {
+	net.Conn
+	mu    sync.Mutex
+	sizes []int
+}
+
+func (w *writeSizes) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	w.sizes = append(w.sizes, len(p))
+	w.mu.Unlock()
+	return len(p), nil
+}
+
+func (w *writeSizes) take() []int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	s := w.sizes
+	w.sizes = nil
+	return s
+}
+
+// A write made only of small packets must not carry their exact size; a write that carries a
+// bulk packet, such as a split 1420 + 120 pair, gets no padding at all.
+func TestSmallWritesArePadded(t *testing.T) {
+	a, b := net.Pipe()
+	defer b.Close()
+	w := &writeSizes{Conn: a}
+	c, err := NewCipher([KeySize]byte{1}, [NonceSize]byte{2})
+	if err != nil {
+		t.Fatal(err)
 	}
-	f := NewStreamFramer(mk(1), mk(2))
-	dst := make([]byte, 4096)
-	sizes := map[int]bool{}
+	cfg := DefaultTunnelConfig()
+	cfg.Jitter = JitterOff
+	cfg.NoiseMinInterval, cfg.NoiseMaxInterval = time.Hour, time.Hour
+	cfg.KeepaliveInterval, cfg.KeepaliveJitter = time.Hour, 0
+	tun := NewTunnel(w, NewStreamFramer(c, c), cfg)
+	defer tun.Close()
+	w.take()
+
 	for i := 0; i < 64; i++ {
-		n, err := f.FrameWithBuffer(dst, PacketData, make([]byte, 52))
-		if err != nil {
+		if err := tun.SendData(make([]byte, 52)); err != nil {
 			t.Fatal(err)
 		}
-		sizes[n] = true
 	}
-	if len(sizes) < 8 {
-		t.Fatalf("a 52-byte packet produced only %d frame sizes", len(sizes))
+	small := map[int]bool{}
+	for _, n := range w.take() {
+		small[n] = true
 	}
-	big := map[int]bool{}
+	if len(small) < 8 {
+		t.Fatalf("lone 52-byte packets made only %d write sizes", len(small))
+	}
 	for i := 0; i < 16; i++ {
-		n, err := f.FrameWithBuffer(dst, PacketData, make([]byte, 1400))
-		if err != nil {
+		if _, err := tun.SendDataBatch([][]byte{make([]byte, 1420), make([]byte, 120)}); err != nil {
 			t.Fatal(err)
 		}
-		big[n] = true
 	}
-	if len(big) != 1 {
-		t.Fatalf("bulk frames got padding: %d sizes", len(big))
+	bulk := map[int]bool{}
+	for _, n := range w.take() {
+		bulk[n] = true
+	}
+	if len(bulk) != 1 {
+		t.Fatalf("writes with a bulk packet got padding: %d sizes", len(bulk))
 	}
 }

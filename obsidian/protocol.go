@@ -549,17 +549,6 @@ func (f *StreamFramer) ParseFrameWithBuffer(dst []byte, raw []byte) (*Packet, er
 	return &Packet{Type: ptype, Payload: dst[:payLen]}, nil
 }
 
-// smallFramePadLimit and smallFramePadMax: a DATA frame whose payload is at most
-// smallFramePadLimit bytes gets random padding below smallFramePadMax when the profile adds
-// none. Without it a small record carries the exact size of the inner packet: a pure TCP ACK,
-// for instance, always made a 97-byte TLS record, and those records were most of the reverse
-// direction of every download. Bulk frames are left alone, so the cost is a fraction of a
-// percent. Receivers strip padding the same way for every frame, old ones included.
-const (
-	smallFramePadLimit = 200
-	smallFramePadMax   = 97
-)
-
 // framePadding returns the padding range for a frame of ptype carrying n payload bytes.
 func (f *StreamFramer) framePadding(ptype PacketType, n int) (int, int) {
 	padMin, padMax := f.paddingFor(ptype)
@@ -569,9 +558,6 @@ func (f *StreamFramer) framePadding(ptype PacketType, n int) (int, int) {
 	if f.PaddingCfg.UseBucketPadding {
 		padLen := CalculateBucketPaddingWithTrailer(n, f.PaddingCfg.BucketMTU, f.PaddingCfg.MaxTrailer)
 		return padLen, padLen
-	}
-	if padMax <= padMin && padMax == 0 && n <= smallFramePadLimit {
-		return 0, smallFramePadMax
 	}
 	return padMin, padMax
 }
