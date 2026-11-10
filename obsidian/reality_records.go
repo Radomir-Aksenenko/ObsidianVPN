@@ -91,6 +91,7 @@ type tlsRecordConn struct {
 	wmu                       sync.Mutex
 	wbuf                      []byte
 	enc, dec                  cipher.AEAD
+	encKey, decKey            [32]byte // current record keys, stepped by nextRealityRecordKey
 	writeCounter, readCounter uint64
 	writeNonce, readNonce     [12]byte
 	readBuf                   []byte
@@ -176,7 +177,11 @@ func (c *tlsRecordConn) Write(b []byte) (int, error) {
 	out := c.wbuf[:0]
 	for p := b; len(p) > 0; {
 		if c.enc != nil && c.writeCounter >= maxRealityRecords {
-			return 0, errors.New("reality record key usage limit reached")
+			enc, err := nextRealityRecordKey(&c.encKey)
+			if err != nil {
+				return 0, err
+			}
+			c.enc, c.writeCounter = enc, 0
 		}
 		n := min(len(p), maxChunk)
 		out = appendRecordHeader(out, recordTypeAppData, n+overhead)
