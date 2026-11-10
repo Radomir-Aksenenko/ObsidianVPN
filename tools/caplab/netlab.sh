@@ -61,8 +61,8 @@ keys() {
 
 obsidian() { # version mode
   local v=$1 mode=$2 name="obs-$1-$2"
-  local srv='"host":"172.31.0.1","port":"8443","protocol_version":2,"tun_interface":"obtun0","tun_address":"10.8.0.1/24","mtu":1420,"disable_dns_proxy":true,"enable_udp_data":false,"profile":"fast-secure","jitter":"off","tcp_congestion":"bbr"'
-  local cli='"server_host":"172.31.0.1","server_port":"8443","protocol_version":2,"tun_address":"10.8.0.2/24","dns":"10.8.0.1","mtu":1420,"enable_udp_data":false,"profile":"fast-secure","jitter":"off","fingerprint":"chrome"'
+  local srv='"host":"172.31.0.1","port":"8443","protocol_version":2,"tun_interface":"obtun0","tun_address":"10.8.0.1/24","mtu":1420,"disable_dns_proxy":true,"enable_udp_data":false,"profile":"fast-secure","jitter":"off","tcp_congestion":"bbr"'"${SRV_EXTRA:+,$SRV_EXTRA}"
+  local cli='"server_host":"172.31.0.1","server_port":"8443","protocol_version":2,"tun_address":"10.8.0.2/24","dns":"10.8.0.1","mtu":1420,"enable_udp_data":false,"profile":"fast-secure","jitter":"off","fingerprint":"chrome"'"${CLI_EXTRA:+,$CLI_EXTRA}"
   if [ "$mode" = native ]; then
     echo "{$srv,\"transport\":\"native-reality\",\"server_private_key\":\"$SPRIV\",\"server_public_key\":\"$SPUB\",\"reality_private_key\":\"$RPRIV\",\"reality_short_ids\":[\"$SID\"],\"reality_target\":\"${TARGET:-$SNI:443}\",\"reality_server_names\":[\"$SNI\"]}" > "$RES/$name.srv.json"
     echo "{$cli,\"transport\":\"native-reality\",\"server_public_key\":\"$SPUB\",\"client_private_key\":\"$CPRIV\",\"reality_public_key\":\"$RPUB\",\"reality_short_id\":\"$SID\",\"reality_sni\":\"$SNI\",\"allow_direct_udp\":false}" > "$RES/$name.cli.json"
@@ -89,7 +89,7 @@ obsidian() { # version mode
     echo "$name: did not connect"; cat "$RES/$name.client.log"
     kill $cpid $spid $dpid 2>/dev/null; sleep 1; return
   fi
-  ns ip link set ctun up mtu 1420
+  ns ip link set ctun up mtu "${CLI_MTU:-1420}"
   ns ip addr add 10.8.0.2/24 dev ctun
   sleep 0.5
   local c0=$(( $(cpu_of $cpid) + $(cpu_of $spid) ))

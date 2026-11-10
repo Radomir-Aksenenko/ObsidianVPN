@@ -618,6 +618,7 @@ func handleClient(conn net.Conn, priv, pub [obsidian.KeySize]byte,
 			return
 		}
 		route := tunRoutes.registerSession(sessionID, tunnel.SendData)
+		route.allowStreamMTU()
 		route.setBatchSender(tunnel.SendDataBatch)
 		route.setIdentity(hs.ClientStaticPub())
 		defer route.Close()

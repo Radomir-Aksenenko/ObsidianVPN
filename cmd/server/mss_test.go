@@ -303,3 +303,38 @@ func TestFragmentIPv4(t *testing.T) {
 		t.Fatal("reassembled payload differs from the original")
 	}
 }
+
+// A TCP-only session whose client SYN shows a 1500-byte TUN gets whole 1500-byte packets; a
+// session that may use the UDP data channel stays at the transport MTU, and a 1420 client stays
+// at 1420 either way.
+func TestStreamSessionLearnsFullMTU(t *testing.T) {
+	syn := func(mss uint16) []byte {
+		return buildTCPPacket(false, 1, 100, tcpSYN, []byte{2, 4, byte(mss >> 8), byte(mss), 1, 3, 3, 7}, nil)
+	}
+	cases := []struct {
+		name   string
+		stream bool
+		mss    uint16
+		want   int32
+	}{
+		{"stream, 1500 client", true, 1460, maxStreamMTU},
+		{"stream, 1420 client", true, 1380, 1420},
+		{"udp, 1500 client", false, 1460, maxTunnelMTU},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newTunRouter(&fakeTUN{})
+			s := newPhone(r, "p")
+			defer s.Close()
+			if tc.stream {
+				s.allowStreamMTU()
+			}
+			if err := s.writeToTUN(syn(tc.mss)); err != nil {
+				t.Fatal(err)
+			}
+			if got := s.mtu.Load(); got != tc.want {
+				t.Fatalf("session MTU = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}

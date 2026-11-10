@@ -10,6 +10,10 @@ const (
 	externalMSS6 = 1440
 	minClientMTU = 1280
 	maxTunnelMTU = 1420
+	// maxStreamMTU is the largest downlink packet for a session that only uses the TCP tunnel.
+	// The stream has no datagram limit, so a client whose TUN takes 1500-byte packets gets
+	// internet segments whole instead of split in two (twice the packets, frames and headers).
+	maxStreamMTU = 1500
 
 	ipProtoTCP = 6
 	tcpFIN     = 0x01

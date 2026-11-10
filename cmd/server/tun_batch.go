@@ -161,7 +161,7 @@ func (s *routedSession) WriteBatch(bufs [][]byte) error {
 		}
 		if s.router.normalizeMSS {
 			if clientMTU := normalizeUplinkSYN(packet); clientMTU > 0 {
-				s.mtu.Store(int32(min(max(clientMTU, minClientMTU), s.router.tunnelMTU)))
+				s.learnClientMTU(clientMTU)
 			}
 		}
 		kept = append(kept, b)

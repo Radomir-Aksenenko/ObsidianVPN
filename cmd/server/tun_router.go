@@ -76,6 +76,8 @@ type routedSession struct {
 
 	// mtu is the largest downlink packet this client accepts.
 	mtu atomic.Int32
+	// mtuCap bounds mtu: the transport MTU, or maxStreamMTU for a TCP-only session.
+	mtuCap atomic.Int32
 	// bind4 and bind6 hold this client's addresses, one per IP family.
 	bind4, bind6 atomic.Pointer[addrBinding]
 	// identity is the device's key, guarded by router.mu.
@@ -258,6 +260,7 @@ func (r *tunRouter) registerSession(sid string, send func([]byte) error) *routed
 		done:   make(chan struct{}),
 	}
 	s.mtu.Store(int32(r.tunnelMTU))
+	s.mtuCap.Store(int32(r.tunnelMTU))
 	r.mu.Lock()
 	r.sessions[s] = struct{}{}
 	r.mu.Unlock()
@@ -306,7 +309,7 @@ func (s *routedSession) writeToTUN(packet []byte) error {
 	}
 	if s.router.normalizeMSS {
 		if clientMTU := normalizeUplinkSYN(packet); clientMTU > 0 {
-			s.mtu.Store(int32(min(max(clientMTU, minClientMTU), s.router.tunnelMTU)))
+			s.learnClientMTU(clientMTU)
 		}
 	}
 	return s.router.writePacket(packet)
@@ -720,4 +723,17 @@ func packetEndpoints(packet []byte) (src, dst netip.Addr, ok bool) {
 	default:
 		return netip.Addr{}, netip.Addr{}, false
 	}
+}
+
+// allowStreamMTU lets a session that only uses the TCP tunnel receive packets up to
+// maxStreamMTU when its client's SYN shows that its TUN takes them. Call it before traffic.
+func (s *routedSession) allowStreamMTU() {
+	if s.router.normalizeMSS {
+		s.mtuCap.Store(maxStreamMTU)
+	}
+}
+
+// learnClientMTU records the client MTU seen in an uplink SYN.
+func (s *routedSession) learnClientMTU(clientMTU int) {
+	s.mtu.Store(int32(min(max(clientMTU, minClientMTU), int(s.mtuCap.Load()))))
 }
