@@ -127,7 +127,9 @@ func TestRealityClientWaitsForRestOfFlight(t *testing.T) {
 	lastRecord := make(chan struct{})
 	go func() {
 		_, _ = server.Write(buildTLSServerHelloRecord(make([]byte, 32)))
-		rec := append(appendRecordHeader(nil, recordTypeAppData, 53), make([]byte, 53)...)
+		// A coalesced flight: no separate Finished, so the idle gap ends it once the
+		// certificate-sized data has arrived.
+		rec := append(appendRecordHeader(nil, recordTypeAppData, 700), make([]byte, 700)...)
 		_, _ = server.Write(rec)
 		time.Sleep(30 * time.Millisecond)
 		_, _ = server.Write(rec)

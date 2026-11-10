@@ -2,6 +2,7 @@ package obsidian
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/cipher"
 	"crypto/tls"
 	"encoding/binary"
@@ -237,6 +238,43 @@ func readTLSRecord(r io.Reader) ([]byte, error) {
 	return rec, nil
 }
 
+// readFlightRecord reads one flight record. Only the wait for its first byte is bounded by idle:
+// once a record has started it is read to the end within hard, so a target that pauses inside a
+// large record (a certificate chain arriving in several segments) is never cut mid-record.
+func readFlightRecord(conn net.Conn, idle, hard time.Time) ([]byte, error) {
+	if idle.After(hard) {
+		idle = hard
+	}
+	_ = conn.SetReadDeadline(idle)
+	var first [1]byte
+	if _, err := io.ReadFull(conn, first[:]); err != nil {
+		return nil, err
+	}
+	_ = conn.SetReadDeadline(hard)
+	return readTLSRecord(io.MultiReader(bytes.NewReader(first[:]), conn))
+}
+
+// flightIdleDeadline is when a quiet target ends the flight: flightIdleGap from now once the
+// certificate has arrived, otherwise only at the hard limit.
+func flightIdleDeadline(encBytes int, hard time.Time) time.Time {
+	if encBytes < flightCertBytes {
+		return hard
+	}
+	if idle := time.Now().Add(flightIdleGap); idle.Before(hard) {
+		return idle
+	}
+	return hard
+}
+
+// flightEndsWith reports whether rec, the encEncrypted-th encrypted record of a TLS 1.3 flight,
+// is the server's Finished. Finished is the last record of a full handshake flight and its size
+// follows from the cipher suite. It must come after at least EncryptedExtensions, Certificate and
+// CertificateVerify, so an earlier record of the same size never ends the flight. Targets that
+// coalesce handshake messages into fewer records fall back to the idle gap.
+func flightEndsWith(rec []byte, encrypted, finishedSize int) bool {
+	return finishedSize > 0 && encrypted >= 4 && rec[0] == recordTypeAppData && len(rec)-tlsRecordHeaderSize == finishedSize
+}
+
 // ── Server side: the first flight ────────────────────────────────────────────
 
 const (
@@ -244,6 +282,10 @@ const (
 	// flight in one burst and then wait for the client.
 	flightIdleGap = 120 * time.Millisecond
 	flightMaxWait = 3 * time.Second
+	// flightCertBytes is how many encrypted flight bytes must have arrived before a quiet gap
+	// may end the flight. A certificate chain is always larger, so a target that pauses after
+	// EncryptedExtensions (fetching OCSP, a slow backend) is waited for instead of cut short.
+	flightCertBytes = 512
 	flightMaxSize = 64 * 1024
 )
 
@@ -283,9 +325,11 @@ func streamFlight(dst io.Writer, targetAddr string, clientHello []byte, dialTime
 		return 0, false, err
 	}
 	start := time.Now()
-	_ = conn.SetReadDeadline(start.Add(dialTimeout))
+	hard := start.Add(flightMaxWait)
+	idle := start.Add(dialTimeout)
+	finishedSize, encrypted, encBytes := 0, 0, 0
 	for sent < flightMaxSize {
-		rec, err := readTLSRecord(conn)
+		rec, err := readFlightRecord(conn, idle, hard.Add(dialTimeout))
 		if err != nil {
 			if time.Since(start) >= flightMaxWait {
 				return sent, sawEncrypted, errors.New("reality target flight exceeded time limit")
@@ -296,7 +340,7 @@ func streamFlight(dst io.Writer, targetAddr string, clientHello []byte, dialTime
 			return sent, sawEncrypted, errors.New("reality target flight exceeded size limit")
 		}
 		if sent == 0 {
-			if _, err := serverFinishedRecordSize(rec); err != nil {
+			if finishedSize, err = serverFinishedRecordSize(rec); err != nil {
 				return 0, false, err
 			}
 		}
@@ -304,6 +348,8 @@ func streamFlight(dst io.Writer, targetAddr string, clientHello []byte, dialTime
 		case recordTypeHandshake, recordTypeCCS:
 		case recordTypeAppData:
 			sawEncrypted = true
+			encrypted++
+			encBytes += len(rec) - tlsRecordHeaderSize
 		default:
 			return sent, sawEncrypted, fmt.Errorf("target sent record type 0x%02x", rec[0])
 		}
@@ -313,11 +359,10 @@ func streamFlight(dst io.Writer, targetAddr string, clientHello []byte, dialTime
 			return sent, sawEncrypted, fmt.Errorf("%w: %w", errFlightWrite, io.ErrShortWrite)
 		}
 		sent += len(rec)
-		deadline := time.Now().Add(flightIdleGap)
-		if max := start.Add(flightMaxWait); deadline.After(max) {
-			deadline = max
+		if flightEndsWith(rec, encrypted, finishedSize) {
+			return sent, true, nil
 		}
-		_ = conn.SetReadDeadline(deadline)
+		idle = flightIdleDeadline(encBytes, hard)
 	}
 	return sent, sawEncrypted, errors.New("reality target flight reached size limit")
 }
@@ -356,11 +401,19 @@ func clientFinishRecords(finishedSize int) []byte {
 // Without the target's traffic secret we cannot parse encrypted handshake boundaries, so this
 // uses the same idle-gap heuristic as the relay, at a small connection-setup latency cost.
 func awaitServerFlight(conn net.Conn) (int, error) {
-	finishedSize := 0
+	finishedSize, encrypted, encBytes := 0, 0, 0
 	sawEncrypted := false
 	start := time.Now()
+	hard := start.Add(flightMaxWait)
+	var idle time.Time
 	for total := 0; total < flightMaxSize; {
-		rec, err := readTLSRecord(conn)
+		var rec []byte
+		var err error
+		if sawEncrypted {
+			rec, err = readFlightRecord(conn, idle, hard.Add(flightMaxWait))
+		} else {
+			rec, err = readTLSRecord(conn)
+		}
 		if err != nil {
 			var ne net.Error
 			if sawEncrypted && !errors.Is(err, errPartialTLSRecord) && errors.As(err, &ne) && ne.Timeout() && time.Since(start) < flightMaxWait {
@@ -375,6 +428,11 @@ func awaitServerFlight(conn net.Conn) (int, error) {
 				return 0, errors.New("encrypted flight before TLS 1.3 ServerHello")
 			}
 			sawEncrypted = true
+			encrypted++
+			encBytes += len(rec) - tlsRecordHeaderSize
+			if flightEndsWith(rec, encrypted, finishedSize) {
+				return finishedSize, nil
+			}
 		case recordTypeHandshake:
 			finishedSize, err = serverFinishedRecordSize(rec)
 			if err != nil {
@@ -387,11 +445,7 @@ func awaitServerFlight(conn net.Conn) (int, error) {
 			return 0, fmt.Errorf("unexpected TLS record content type: 0x%02x", rec[0])
 		}
 		if sawEncrypted {
-			deadline := time.Now().Add(flightIdleGap)
-			if limit := start.Add(flightMaxWait); deadline.After(limit) {
-				deadline = limit
-			}
-			_ = conn.SetReadDeadline(deadline)
+			idle = flightIdleDeadline(encBytes, hard)
 		}
 	}
 	return 0, fmt.Errorf("%w: no encrypted record in server flight", ErrRealityNoServerHello)

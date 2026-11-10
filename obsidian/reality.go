@@ -9,9 +9,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -845,6 +847,9 @@ func (d *RealityDemuxer) processIncoming(conn net.Conn) (net.Conn, bool) {
 		// Hand the client the target's real first flight, then talk in TLS records.
 		_ = conn.SetWriteDeadline(time.Now().Add(d.cfg.DialTimeout + flightMaxWait))
 		if err := relayFirstFlight(conn, d.cfg.FallbackTarget, buf[:needed], sessionID, d.cfg.DialTimeout); err != nil {
+			if flightFailLog.ready(time.Now()) {
+				log.Printf("reality: relaying the target flight failed: %v", err)
+			}
 			conn.Close()
 			return nil, false
 		}
@@ -986,4 +991,18 @@ func (d *RealityDemuxer) Close() error {
 
 func (d *RealityDemuxer) Addr() net.Addr {
 	return d.listener.Addr()
+}
+
+// flightFailLog limits relay failure logs to one a minute: a broken or slow target would
+// otherwise log once per connection.
+var flightFailLog rateLimitedLog
+
+type rateLimitedLog struct{ last atomic.Int64 }
+
+func (l *rateLimitedLog) ready(now time.Time) bool {
+	prev := l.last.Load()
+	if now.UnixNano()-prev < int64(time.Minute) {
+		return false
+	}
+	return l.last.CompareAndSwap(prev, now.UnixNano())
 }
