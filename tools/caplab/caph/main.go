@@ -9,8 +9,10 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/signal"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"obsidian/obsidian"
@@ -121,6 +123,29 @@ func main() {
 	s, err := client.NewSession(&cfg, client.WithAutoReconnect(false))
 	if err != nil {
 		log.Fatal(err)
+	}
+	// CAPH_TUN=name runs the session on a real TUN device until SIGINT/SIGTERM, so real TCP
+	// tools (iperf3, curl) can be driven through it. The caller assigns the address and routes.
+	if name := os.Getenv("CAPH_TUN"); name != "" {
+		tun, err := openTUN(name)
+		if err != nil {
+			log.Fatal(err)
+		}
+		s.StartAsync(tun)
+		deadline := time.Now().Add(20 * time.Second)
+		for s.Status() != client.StatusConnected {
+			if time.Now().After(deadline) {
+				log.Fatalf("not connected: %s", s.Status())
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		mark("connected")
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+		<-sig
+		s.Stop()
+		tun.Close()
+		return
 	}
 	d := &dev{in: make(chan []byte, 4096), closed: make(chan struct{})}
 	s.StartAsync(d)

@@ -565,7 +565,7 @@ func copyTunToTunnel(tun io.ReadWriter, tunnel *obsidian.Tunnel) error {
 		for _, bp := range batch {
 			pkts = append(pkts, *bp)
 		}
-		_, err = tunnel.SendDataBatch(pkts)
+		_, err = tunnel.SendDataBatch(client.ThinACKs(pkts))
 		reader.Release(batch)
 		if err != nil {
 			return fmt.Errorf("tunnel send: %w", err)
@@ -683,6 +683,7 @@ func copyTunToData(tun io.ReadWriter, ch *obsidian.UDPChannel, tunnel *obsidian.
 				}
 			}
 		}
+		viaTCP = client.ThinACKs(viaTCP)
 		if len(viaTCP) > 0 {
 			if _, err := tunnel.SendDataBatch(viaTCP); err != nil {
 				reader.Release(batch)
