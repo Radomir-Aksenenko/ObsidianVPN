@@ -382,12 +382,7 @@ func maskFrameLen(key *[KeySize]byte, ctr uint64, n uint32) uint32 {
 }
 
 func (f *StreamFramer) Frame(ptype PacketType, payload []byte) ([]byte, error) {
-	padMin, padMax := f.paddingFor(ptype)
-	if ptype == PacketData && f.PaddingCfg.UseBucketPadding {
-		padLen := CalculateBucketPaddingWithTrailer(len(payload), f.PaddingCfg.BucketMTU, f.PaddingCfg.MaxTrailer)
-		padMin = padLen
-		padMax = padLen
-	}
+	padMin, padMax := f.framePadding(ptype, len(payload))
 	pkt, err := encodePacketWithHeaderProtection(f.EncCipher, f.EncHeaderKey, &f.HeaderCfg, ptype, payload, padMin, padMax)
 	if err != nil {
 		return nil, err
@@ -401,12 +396,7 @@ func (f *StreamFramer) Frame(ptype PacketType, payload []byte) ([]byte, error) {
 }
 
 func (f *StreamFramer) FrameWithBuffer(dst []byte, ptype PacketType, payload []byte) (int, error) {
-	padMin, padMax := f.paddingFor(ptype)
-	if ptype == PacketData && f.PaddingCfg.UseBucketPadding {
-		padLen := CalculateBucketPaddingWithTrailer(len(payload), f.PaddingCfg.BucketMTU, f.PaddingCfg.MaxTrailer)
-		padMin = padLen
-		padMax = padLen
-	}
+	padMin, padMax := f.framePadding(ptype, len(payload))
 	return f.FrameWithPadding(dst, ptype, payload, padMin, padMax)
 }
 
@@ -557,6 +547,33 @@ func (f *StreamFramer) ParseFrameWithBuffer(dst []byte, raw []byte) (*Packet, er
 		return nil, err
 	}
 	return &Packet{Type: ptype, Payload: dst[:payLen]}, nil
+}
+
+// smallFramePadLimit and smallFramePadMax: a DATA frame whose payload is at most
+// smallFramePadLimit bytes gets random padding below smallFramePadMax when the profile adds
+// none. Without it a small record carries the exact size of the inner packet: a pure TCP ACK,
+// for instance, always made a 97-byte TLS record, and those records were most of the reverse
+// direction of every download. Bulk frames are left alone, so the cost is a fraction of a
+// percent. Receivers strip padding the same way for every frame, old ones included.
+const (
+	smallFramePadLimit = 200
+	smallFramePadMax   = 97
+)
+
+// framePadding returns the padding range for a frame of ptype carrying n payload bytes.
+func (f *StreamFramer) framePadding(ptype PacketType, n int) (int, int) {
+	padMin, padMax := f.paddingFor(ptype)
+	if ptype != PacketData {
+		return padMin, padMax
+	}
+	if f.PaddingCfg.UseBucketPadding {
+		padLen := CalculateBucketPaddingWithTrailer(n, f.PaddingCfg.BucketMTU, f.PaddingCfg.MaxTrailer)
+		return padLen, padLen
+	}
+	if padMax <= padMin && padMax == 0 && n <= smallFramePadLimit {
+		return 0, smallFramePadMax
+	}
+	return padMin, padMax
 }
 
 func (f *StreamFramer) paddingFor(pt PacketType) (int, int) {

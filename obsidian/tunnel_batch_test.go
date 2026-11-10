@@ -256,3 +256,38 @@ func BenchmarkTunnelRoundTrip(b *testing.B) {
 	b.Run("records", func(b *testing.B) { run(b, "records") })
 	b.Run("native", func(b *testing.B) { run(b, "native") })
 }
+
+// Small DATA frames must not carry the exact size of the inner packet; bulk frames keep theirs.
+func TestSmallDataFramesArePadded(t *testing.T) {
+	mk := func(k byte) *Cipher {
+		c, err := NewCipher([KeySize]byte{k}, [NonceSize]byte{k})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	f := NewStreamFramer(mk(1), mk(2))
+	dst := make([]byte, 4096)
+	sizes := map[int]bool{}
+	for i := 0; i < 64; i++ {
+		n, err := f.FrameWithBuffer(dst, PacketData, make([]byte, 52))
+		if err != nil {
+			t.Fatal(err)
+		}
+		sizes[n] = true
+	}
+	if len(sizes) < 8 {
+		t.Fatalf("a 52-byte packet produced only %d frame sizes", len(sizes))
+	}
+	big := map[int]bool{}
+	for i := 0; i < 16; i++ {
+		n, err := f.FrameWithBuffer(dst, PacketData, make([]byte, 1400))
+		if err != nil {
+			t.Fatal(err)
+		}
+		big[n] = true
+	}
+	if len(big) != 1 {
+		t.Fatalf("bulk frames got padding: %d sizes", len(big))
+	}
+}
