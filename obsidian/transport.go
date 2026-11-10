@@ -438,7 +438,8 @@ func DialObsidian(cfg ClientTransportConfig) (net.Conn, error) {
 
 	fp := cfg.Fingerprint
 	if fp == nil {
-		fp = &utls.HelloChrome_120
+		// Same current Chrome fingerprint as every other dial path; Chrome 120 is from 2023.
+		fp = &utls.HelloChrome_Auto
 	}
 
 	uConn := utls.UClient(rawConn, tlsCfg, *fp)

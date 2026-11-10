@@ -529,12 +529,9 @@ func (f *StreamFramer) ParseFrameInto(dst []byte, raw []byte) (PacketType, int, 
 	}
 
 	if len(dst) < payLen+padLen {
-		plaintext, err := f.DecCipher.Decrypt(ct, aad[:])
-		if err != nil {
-			return 0, 0, fmt.Errorf("decrypt: %w", err)
-		}
-		copy(dst, plaintext[:payLen])
-		return ptype, payLen, nil
+		// Copying a truncated payload while reporting payLen let callers slice past what was
+		// written. The stream is unusable after this anyway: the nonce counter would desync.
+		return 0, 0, io.ErrShortBuffer
 	}
 
 	_, err = f.DecCipher.DecryptWithBuffer(dst, ct, aad[:])

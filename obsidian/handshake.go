@@ -364,6 +364,8 @@ func (c *ClientHandshake) BuildHello() ([]byte, error) {
 
 // ProcessServerHello обрабатывает ServerHello с гибридным постквантовым ответом.
 func (c *ClientHandshake) ProcessServerHello(data []byte) (*StreamFramer, error) {
+	// The ephemeral secret is single use: wipe it on failure too, not only on success.
+	defer c.ephemeralKeypair.Zero()
 	if len(data) < 1 {
 		return nil, errors.New("server hello too short")
 	}
@@ -455,7 +457,6 @@ func (c *ClientHandshake) ProcessServerHello(data []byte) (*StreamFramer, error)
 	clientHeaderKey, serverHeaderKey := DeriveTCPHeaderKeys(c.SessionKeys)
 	framer := NewProtectedStreamFramer(cliEnc, srvDec, clientHeaderKey, serverHeaderKey)
 	framer.HeaderCfg = c.ObfCfg.Headers
-	c.ephemeralKeypair.Zero()
 	return framer, nil
 }
 
@@ -520,6 +521,7 @@ func SkipJunkFrames(buf []byte, maxCount int) ([]byte, error) {
 
 // ProcessClientHello обрабатывает гибридный ClientHello (X25519 + ML-KEM-768).
 func (s *ServerHandshake) ProcessClientHello(data []byte) ([]byte, *StreamFramer, error) {
+	defer s.ephKeypair.Zero()
 	if len(data) < 1 {
 		return nil, nil, errors.New("client hello too short")
 	}
@@ -687,7 +689,6 @@ func (s *ServerHandshake) ProcessClientHello(data []byte) ([]byte, *StreamFramer
 	clientHeaderKey, serverHeaderKey := DeriveTCPHeaderKeys(s.SessionKeys)
 	framer := NewProtectedStreamFramer(srvEnc2, cliDec, serverHeaderKey, clientHeaderKey)
 	framer.HeaderCfg = s.ObfCfg.Headers
-	s.ephKeypair.Zero()
 	return hello, framer, nil
 }
 
