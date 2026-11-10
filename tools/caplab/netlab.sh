@@ -70,7 +70,7 @@ obsidian() { # version mode
     echo "{$srv,\"server_private_key\":\"$SPRIV\",\"server_public_key\":\"$SPUB\",\"reality_target\":\"${TARGET:-$SNI:443}\",\"reality_server_names\":[\"$SNI\"],\"reality_auth_key\":\"$AUTH\"}" > "$RES/$name.srv.json"
     echo "{$cli,\"server_public_key\":\"$SPUB\",\"client_private_key\":\"$CPRIV\",\"reality_enabled\":true,\"reality_sni\":\"$SNI\",\"reality_auth_key\":\"$AUTH\"}" > "$RES/$name.cli.json"
   fi
-  ${SERVER_PROFILE_SECS:+env OBSIDIAN_CPUPROFILE=$RES/$name.server.pprof OBSIDIAN_CPUPROFILE_SECS=$SERVER_PROFILE_SECS} "$OUT/server-$v" -config "$RES/$name.srv.json" > "$RES/$name.server.log" 2>&1 &
+  env ${SERVER_PROFILE_SECS:+OBSIDIAN_CPUPROFILE=$RES/$name.server.pprof OBSIDIAN_CPUPROFILE_SECS=$SERVER_PROFILE_SECS} ${ACK_HOLD_BYTES:+OBSIDIAN_ACK_HOLD_BYTES=$ACK_HOLD_BYTES} "$OUT/server-$v" -config "$RES/$name.srv.json" > "$RES/$name.server.log" 2>&1 &
   local spid=$!
   # The native server probes the cover site for about 5 s before it accepts; a client that
   # connected earlier would wait in the accept queue and inflate connect_ms.
@@ -81,7 +81,7 @@ obsidian() { # version mode
   sleep 0.5
   local t0=$(date +%s%N)
   # Not through ns(): a backgrounded shell function would give the subshell's pid.
-  ip netns exec cli env CAPH_TUN=ctun ${CAPH_CPUPROFILE:+CAPH_CPUPROFILE=$RES/$name.cpu.pprof} ${CAPH_ACK_HOLD_MS:+CAPH_ACK_HOLD_MS=$CAPH_ACK_HOLD_MS} "$OUT/caph-$v" "$RES/$name.cli.json" > "$RES/$name.client.log" 2>&1 &
+  ip netns exec cli env CAPH_TUN=ctun ${CAPH_CPUPROFILE:+CAPH_CPUPROFILE=$RES/$name.cpu.pprof} ${CAPH_ACK_HOLD_MS:+CAPH_ACK_HOLD_MS=$CAPH_ACK_HOLD_MS} ${ACK_HOLD_BYTES:+CAPH_ACK_HOLD_BYTES=$ACK_HOLD_BYTES} "$OUT/caph-$v" "$RES/$name.cli.json" > "$RES/$name.client.log" 2>&1 &
   local cpid=$!
   for _ in $(seq 1 200); do grep -q "PHASE connected" "$RES/$name.client.log" && break; sleep 0.05; done
   local t1=$(date +%s%N)

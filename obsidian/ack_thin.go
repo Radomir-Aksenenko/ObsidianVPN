@@ -131,7 +131,7 @@ func ThinACKs(pkts [][]byte) [][]byte {
 // low RTT, or when the receiver acknowledges GRO-merged segments, few ACKs arrive and each one
 // waited the whole hold. Bounding the run by bytes keeps the ACK clock fine enough for any rate
 // while slow flows still fold their ACKs over the time limit.
-const ACKHoldBytes = 32 << 10
+var ACKHoldBytes uint32 = 32 << 10
 
 // ackProgressFlows is how many connections ACKProgress follows; a run spanning more is sent.
 const ackProgressFlows = 8

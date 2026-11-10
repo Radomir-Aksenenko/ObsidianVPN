@@ -122,6 +122,13 @@ func main() {
 	if err := json.Unmarshal(f, &cfg); err != nil {
 		log.Fatal(err)
 	}
+	if b := os.Getenv("CAPH_ACK_HOLD_BYTES"); b != "" {
+		v, err := strconv.ParseUint(b, 10, 32)
+		if err != nil {
+			log.Fatal(err)
+		}
+		obsidian.ACKHoldBytes = uint32(v)
+	}
 	if ms := os.Getenv("CAPH_ACK_HOLD_MS"); ms != "" {
 		v, err := strconv.ParseFloat(ms, 64)
 		if err != nil {
