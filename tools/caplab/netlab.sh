@@ -49,7 +49,7 @@ cpu_of() { # utime+stime of a pid, in clock ticks
 
 run_iperf() { # name target extra-args
   local name=$1 target=$2; shift 2
-  ns iperf3 -c "$target" -t "$T" -O 2 -J "$@" > "$RES/$name.json" 2>&1
+  ns iperf3 -c "$target" -t "$T" -O 2 -J ${IPERF_EXTRA:-} "$@" > "$RES/$name.json" 2>&1
   python3 -c "import json,sys; d=json.load(open('$RES/$name.json')); e=d.get('end',{}); s=e.get('sum_received') or e.get('sum',{}); print(round(s.get('bits_per_second',0)/1e6,1))" 2>/dev/null || echo 0
 }
 
@@ -92,12 +92,14 @@ obsidian() { # version mode
   ns ip link set ctun up mtu "${CLI_MTU:-1420}"
   ns ip addr add 10.8.0.2/24 dev ctun
   sleep 0.5
-  local c0=$(( $(cpu_of $cpid) + $(cpu_of $spid) ))
+  local s0=$(cpu_of $spid)
+  local c0=$(( $(cpu_of $cpid) + s0 ))
   local down=0 up=0
   case " ${DIRS:-down up} " in *" down "*) down=$(run_iperf "$name.down" 10.8.0.1 -R);; esac
   case " ${DIRS:-down up} " in *" up "*) up=$(run_iperf "$name.up" 10.8.0.1);; esac
-  local c1=$(( $(cpu_of $cpid) + $(cpu_of $spid) ))
-  echo "$name connect_ms=$(( (t1-t0)/1000000 )) down_mbit=$down up_mbit=$up cpu_s=$(echo "scale=2; ($c1-$c0)/100" | bc)" | tee -a "$RES/summary.txt"
+  local s1=$(cpu_of $spid)
+  local c1=$(( $(cpu_of $cpid) + s1 ))
+  echo "$name connect_ms=$(( (t1-t0)/1000000 )) down_mbit=$down up_mbit=$up cpu_s=$(echo "scale=2; ($c1-$c0)/100" | bc) srv_cpu_s=$(echo "scale=2; ($s1-$s0)/100" | bc)" | tee -a "$RES/summary.txt"
   kill -INT $cpid; sleep 0.5
   kill -INT $spid; sleep 0.5
   kill -INT $dpid; sleep 0.5
