@@ -63,7 +63,7 @@ func ackOf(p []byte) uint32 { return binary.BigEndian.Uint32(p[28:32]) }
 // any other packet ends the hold at once.
 func TestRoutedSessionHoldsDownlinkACKs(t *testing.T) {
 	old := downlinkACKHold
-	downlinkACKHold = 30 * time.Millisecond
+	downlinkACKHold = 200 * time.Millisecond
 	defer func() { downlinkACKHold = old }()
 
 	r := newTunRouter(nil)
@@ -90,14 +90,14 @@ func TestRoutedSessionHoldsDownlinkACKs(t *testing.T) {
 	enqueue(testPureACK(1000, 300))
 	enqueue(testPureACK(2000, 50))
 	pkts, at := log.wait(t, 2)
-	time.Sleep(40 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
 	if extra, _ := log.wait2(); extra != 0 {
 		t.Fatalf("%d superseded ACKs were sent too", extra)
 	}
 	if ackOf(pkts[0]) != 300 || ackOf(pkts[1]) != 50 {
 		t.Fatalf("sent acks %d, %d; want 300, 50", ackOf(pkts[0]), ackOf(pkts[1]))
 	}
-	if d := at[0].Sub(start); d < 20*time.Millisecond {
+	if d := at[0].Sub(start); d < 150*time.Millisecond {
 		t.Fatalf("ACK run left after %v, before the hold", d)
 	}
 
@@ -105,7 +105,7 @@ func TestRoutedSessionHoldsDownlinkACKs(t *testing.T) {
 	enqueue(testPureACK(1000, 400))
 	enqueue(testTCPData(1000, 1000))
 	_, at = log.wait(t, 2)
-	if d := at[1].Sub(start); d > 20*time.Millisecond {
+	if d := at[1].Sub(start); d > 100*time.Millisecond {
 		t.Fatalf("data waited %v behind held ACKs", d)
 	}
 }

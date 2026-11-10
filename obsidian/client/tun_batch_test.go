@@ -90,7 +90,7 @@ func ackPkt(ack uint32) []byte { return mkSeg(seg{sport: 7, ack: ack, flags: 0x1
 // ACK-only batches wait up to the hold for more ACKs, and anything else ends the wait at once.
 func TestTunBatchReaderHoldsACKOnlyBatches(t *testing.T) {
 	old := ACKHold
-	ACKHold = 40 * time.Millisecond
+	ACKHold = 200 * time.Millisecond
 	defer func() { ACKHold = old }()
 
 	in := make(chanReader, 8)
@@ -112,7 +112,7 @@ func TestTunBatchReaderHoldsACKOnlyBatches(t *testing.T) {
 	if len(batch) != 3 {
 		t.Fatalf("held batch has %d packets, want 3", len(batch))
 	}
-	if waited := time.Since(start); waited < 30*time.Millisecond || waited > 200*time.Millisecond {
+	if waited := time.Since(start); waited < 150*time.Millisecond || waited > time.Second {
 		t.Fatalf("ACK-only batch left after %v, want about the hold", waited)
 	}
 	r.Release(batch)
@@ -127,7 +127,7 @@ func TestTunBatchReaderHoldsACKOnlyBatches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(batch) != 2 || time.Since(start) > 30*time.Millisecond {
+	if len(batch) != 2 || time.Since(start) > 100*time.Millisecond {
 		t.Fatalf("data did not end the hold: %d packets after %v", len(batch), time.Since(start))
 	}
 	r.Release(batch)
@@ -136,7 +136,7 @@ func TestTunBatchReaderHoldsACKOnlyBatches(t *testing.T) {
 	in <- mkSeg(seg{sport: 7, ack: 6, flags: 0x18, payload: 100})
 	start = time.Now()
 	batch, _ = r.NextBatch(nil, nil)
-	if len(batch) != 1 || time.Since(start) > 20*time.Millisecond {
+	if len(batch) != 1 || time.Since(start) > 100*time.Millisecond {
 		t.Fatalf("data batch was held: %d packets after %v", len(batch), time.Since(start))
 	}
 	r.Release(batch)
