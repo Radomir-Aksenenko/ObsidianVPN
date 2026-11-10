@@ -28,8 +28,9 @@ type TunBatchReader struct {
 	once sync.Once
 	pool sync.Pool
 
-	ackHold time.Duration // see ACKHold
-	timer   *time.Timer
+	ackHold  time.Duration // see ACKHold
+	timer    *time.Timer
+	progress obsidian.ACKProgress
 }
 
 // ACKHold is how long an uplink batch made only of pure TCP ACKs may wait for more packets
@@ -38,7 +39,9 @@ type TunBatchReader struct {
 // per downloaded megabyte, where a browser downloading over HTTPS sends almost none. Holding
 // ACK-only batches briefly lets obsidian.ThinACKs fold them into one ACK per connection. A packet with
 // data, SYN, FIN or RST ends the wait at once, so requests, handshakes and interactive traffic
-// are not delayed; only acknowledgements are, by at most ACKHold. Zero disables the hold.
+// are not delayed; only acknowledgements are, by at most ACKHold, and a run that already
+// acknowledges obsidian.ACKHoldBytes of one connection is sent at once so the hold never caps a
+// fast download. Zero disables the hold.
 var ACKHold = 4 * time.Millisecond
 
 // NewTunBatchReader reads tun in its own goroutine until Close is called or Read fails. Like the
@@ -110,6 +113,12 @@ func (r *TunBatchReader) NextBatch(dst []*[]byte, stop <-chan struct{}) ([]*[]by
 	if r.ackHold <= 0 || len(dst) >= UplinkBatchPackets || !allPureACKs(dst) {
 		return dst, nil
 	}
+	r.progress.Reset()
+	for _, bp := range dst {
+		if r.progress.Add(*bp) {
+			return dst, nil
+		}
+	}
 	// Only acknowledgements so far: wait briefly for more, and stop as soon as anything else
 	// arrives.
 	if r.timer == nil {
@@ -123,7 +132,7 @@ func (r *TunBatchReader) NextBatch(dst []*[]byte, stop <-chan struct{}) ([]*[]by
 		case bp := <-r.pkts:
 			dst = append(dst, bp)
 			size += len(*bp)
-			if _, _, ok := obsidian.PureACK(*bp); !ok {
+			if r.progress.Add(*bp) { // data, a flag, or enough acknowledged: send now
 				return dst, nil
 			}
 		case <-r.timer.C:

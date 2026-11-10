@@ -115,3 +115,28 @@ func (l *sentLog) wait2() (int, error) {
 	defer l.mu.Unlock()
 	return len(l.pkts), nil
 }
+
+// A run that already acknowledges ACKHoldBytes of a connection goes out without waiting for the
+// timer: at a low RTT, or with GRO-merged segments, the hold must not cap the upload rate.
+func TestRoutedSessionReleasesFastACKRunEarly(t *testing.T) {
+	old := downlinkACKHold
+	downlinkACKHold = time.Hour
+	defer func() { downlinkACKHold = old }()
+
+	r := newTunRouter(nil)
+	var log sentLog
+	s := r.registerSession("ack", func(p []byte) error { log.add(p); return nil })
+	defer s.Close()
+	for _, ack := range []uint32{1000, 1000 + 20<<10, 1000 + 40<<10} {
+		b := getRoutedPacket(0)
+		p := testPureACK(1000, ack)
+		b = append(b[:0], p...)
+		if !s.enqueue(b) {
+			t.Fatal("enqueue failed")
+		}
+	}
+	pkts, _ := log.wait(t, 1)
+	if got := ackOf(pkts[len(pkts)-1]); got != 1000+40<<10 {
+		t.Fatalf("sent ack %d, want the newest", got)
+	}
+}

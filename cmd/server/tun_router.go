@@ -88,10 +88,11 @@ type routedSession struct {
 	// prioRun counts latency-sensitive sends since the last bulk send. writeLoop only.
 	prioRun int
 	// ackRun and ackTimer are writeLoop's scratch state for holding ACK-only runs.
-	ackRun   [routedBatchSize]routedPacket
-	ackTimer *time.Timer
-	done     chan struct{}
-	once     sync.Once
+	ackRun      [routedBatchSize]routedPacket
+	ackTimer    *time.Timer
+	ackProgress obsidian.ACKProgress
+	done        chan struct{}
+	once        sync.Once
 }
 
 func newTunRouter(tun io.ReadWriter) *tunRouter {
@@ -454,13 +455,16 @@ func (s *routedSession) sendPrioWaiting() {
 // before it goes to the client. During an upload the internet side acknowledges every second
 // segment and each ACK used to leave as its own encrypted record, a stream of small server
 // records an HTTPS upload does not have. Held ACKs are thinned to one per connection
-// (obsidian.ThinACKs). Any other packet ends the wait at once. It mirrors client.ACKHold.
+// (obsidian.ThinACKs). Any other packet ends the wait at once, and so does a run that already
+// acknowledges obsidian.ACKHoldBytes of one connection. It mirrors client.ACKHold.
 var downlinkACKHold = 4 * time.Millisecond
 
 // sendACKRun collects pure ACKs that follow first on the latency lane for up to
 // downlinkACKHold, sends the newest per connection, then sends whatever packet ended the run.
 func (s *routedSession) sendACKRun(first routedPacket, bulk []routedPacket) {
 	run := append(s.ackRun[:0], first)
+	s.ackProgress.Reset()
+	s.ackProgress.Add(first.buf)
 	if s.ackTimer == nil {
 		s.ackTimer = time.NewTimer(downlinkACKHold)
 	} else {
@@ -474,6 +478,9 @@ collect:
 		case p := <-s.prio:
 			if _, _, ack := obsidian.PureACK(p.buf); ack {
 				run = append(run, p)
+				if s.ackProgress.Add(p.buf) {
+					break collect
+				}
 				continue
 			}
 			next = p

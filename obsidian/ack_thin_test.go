@@ -144,3 +144,28 @@ func BenchmarkThinACKs(b *testing.B) {
 		_ = ThinACKs(pkts[:len(src)])
 	}
 }
+
+func TestACKProgress(t *testing.T) {
+	ack := func(port uint16, n uint32) []byte {
+		return mkSeg(seg{sport: port, ack: n, flags: 0x10})
+	}
+	var p ACKProgress
+	if p.Add(ack(1, 0xffff0000)) || p.Add(ack(1, 0xffff0000+20<<10)) {
+		t.Fatal("released before ACKHoldBytes")
+	}
+	if !p.Add(ack(1, 0xffff0000+ACKHoldBytes)) { // across the sequence wrap
+		t.Fatal("not released at ACKHoldBytes")
+	}
+	p.Reset()
+	for i := 0; i < ackProgressFlows; i++ {
+		if p.Add(ack(uint16(10+i), 5)) {
+			t.Fatalf("released at flow %d", i)
+		}
+	}
+	if !p.Add(ack(99, 5)) {
+		t.Fatal("not released past the followed flows")
+	}
+	if !p.Add(mkSeg(seg{sport: 1, ack: 5, flags: 0x18, payload: 10})) {
+		t.Fatal("a data segment did not release the run")
+	}
+}

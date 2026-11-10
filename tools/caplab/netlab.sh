@@ -93,8 +93,9 @@ obsidian() { # version mode
   ns ip addr add 10.8.0.2/24 dev ctun
   sleep 0.5
   local c0=$(( $(cpu_of $cpid) + $(cpu_of $spid) ))
-  local down=$(run_iperf "$name.down" 10.8.0.1 -R)
-  local up=$(run_iperf "$name.up" 10.8.0.1)
+  local down=0 up=0
+  case " ${DIRS:-down up} " in *" down "*) down=$(run_iperf "$name.down" 10.8.0.1 -R);; esac
+  case " ${DIRS:-down up} " in *" up "*) up=$(run_iperf "$name.up" 10.8.0.1);; esac
   local c1=$(( $(cpu_of $cpid) + $(cpu_of $spid) ))
   echo "$name connect_ms=$(( (t1-t0)/1000000 )) down_mbit=$down up_mbit=$up cpu_s=$(echo "scale=2; ($c1-$c0)/100" | bc)" | tee -a "$RES/summary.txt"
   kill -INT $cpid; sleep 0.5

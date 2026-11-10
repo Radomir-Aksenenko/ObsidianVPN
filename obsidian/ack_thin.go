@@ -125,3 +125,46 @@ func ThinACKs(pkts [][]byte) [][]byte {
 	clear(pkts[len(out):])
 	return out
 }
+
+// ACKHoldBytes is how much data the pure ACKs of one held run may acknowledge before the run is
+// sent. A time-only hold caps the inner TCP rate at about the acknowledged data per hold: at a
+// low RTT, or when the receiver acknowledges GRO-merged segments, few ACKs arrive and each one
+// waited the whole hold. Bounding the run by bytes keeps the ACK clock fine enough for any rate
+// while slow flows still fold their ACKs over the time limit.
+const ACKHoldBytes = 32 << 10
+
+// ackProgressFlows is how many connections ACKProgress follows; a run spanning more is sent.
+const ackProgressFlows = 8
+
+// ACKProgress follows how far the pure ACKs of a held run have moved, per connection.
+type ACKProgress struct {
+	flows [ackProgressFlows]struct {
+		flow  ackFlow
+		first uint32
+	}
+	n int
+}
+
+// Reset starts a new run.
+func (p *ACKProgress) Reset() { p.n = 0 }
+
+// Add records pkt, which must be a pure ACK, and reports whether the run should be sent now:
+// one connection is acknowledged by ACKHoldBytes or more since the run began, or the run spans
+// more connections than are followed.
+func (p *ACKProgress) Add(pkt []byte) bool {
+	flow, ack, ok := PureACK(pkt)
+	if !ok {
+		return true
+	}
+	for i := 0; i < p.n; i++ {
+		if p.flows[i].flow == flow {
+			return ackAfter(ack, p.flows[i].first) && ack-p.flows[i].first >= ACKHoldBytes
+		}
+	}
+	if p.n == len(p.flows) {
+		return true
+	}
+	p.flows[p.n].flow, p.flows[p.n].first = flow, ack
+	p.n++
+	return false
+}

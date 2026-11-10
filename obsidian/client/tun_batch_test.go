@@ -141,3 +141,33 @@ func TestTunBatchReaderHoldsACKOnlyBatches(t *testing.T) {
 	}
 	r.Release(batch)
 }
+
+// A held run that acknowledges ACKHoldBytes of a connection is sent at once.
+func TestTunBatchReaderReleasesFastACKRun(t *testing.T) {
+	old := ACKHold
+	ACKHold = time.Hour
+	defer func() { ACKHold = old }()
+
+	in := make(chanReader, 8)
+	r := NewTunBatchReader(in)
+	defer r.Close()
+	in <- ackPkt(1)
+	go func() {
+		time.Sleep(5 * time.Millisecond)
+		in <- ackPkt(1 + 40<<10)
+	}()
+	done := make(chan int, 1)
+	go func() {
+		batch, _ := r.NextBatch(nil, nil)
+		done <- len(batch)
+		r.Release(batch)
+	}()
+	select {
+	case n := <-done:
+		if n != 2 {
+			t.Fatalf("batch has %d packets, want 2", n)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a fast ACK run waited for the timer")
+	}
+}
