@@ -545,18 +545,23 @@ func echoTest(tunnel *obsidian.Tunnel) {
 }
 
 func copyTunToTunnel(tun io.ReadWriter, tunnel *obsidian.Tunnel) error {
-	buf := make([]byte, 2048)
-	packets := 0
-	bytes := 0
+	reader := client.NewTunBatchReader(tun)
+	defer reader.Close()
+	batch := make([]*[]byte, 0, client.UplinkBatchPackets)
+	pkts := make([][]byte, 0, client.UplinkBatchPackets)
 	for {
-		n, err := tun.Read(buf)
+		var err error
+		batch, err = reader.NextBatch(batch, nil)
 		if err != nil {
 			return fmt.Errorf("tun read: %w", err)
 		}
-		packets++
-		bytes += n
-
-		if err := tunnel.SendData(buf[:n]); err != nil {
+		pkts = pkts[:0]
+		for _, bp := range batch {
+			pkts = append(pkts, *bp)
+		}
+		_, err = tunnel.SendDataBatch(pkts)
+		reader.Release(batch)
+		if err != nil {
 			return fmt.Errorf("tunnel send: %w", err)
 		}
 	}
@@ -627,27 +632,34 @@ func setOptimalUDPBuffers(conn *net.UDPConn) {
 }
 
 func copyTunToData(tun io.ReadWriter, ch *obsidian.UDPChannel, tunnel *obsidian.Tunnel, udpActive *atomic.Bool, enableIPv6 bool, udpPending *atomic.Int64) error {
-	pBuf := getClientUDPPacketBuf()
-	defer putClientUDPPacketBuf(pBuf)
 	sendBuf := make([]byte, 2048)
 	packets := 0
 	var udpFailCount atomic.Int32
+	reader := client.NewTunBatchReader(tun)
+	defer reader.Close()
+	batch := make([]*[]byte, 0, client.UplinkBatchPackets)
+	viaTCP := make([][]byte, 0, client.UplinkBatchPackets)
 	for {
-		buf := (*pBuf)[:cap(*pBuf)]
-		n, err := tun.Read(buf)
+		var err error
+		batch, err = reader.NextBatch(batch, nil)
 		if err != nil {
 			return fmt.Errorf("tun read: %w", err)
 		}
-		packet := buf[:n]
-		packets++
-		if !enableIPv6 && isIPv6Packet(packet) {
-			writeIPv6Unreachable(tun, packet)
-			continue
-		}
-		if debugLogging && (packets <= 8 || packets%1000 == 0) {
-			log.Printf("DEBUG: TUN -> OUT packet #%d (%d bytes, IPv%d, udpActive=%v)", packets, len(packet), packet[0]>>4, udpActive.Load())
-		}
-		if udpActive.Load() {
+		viaTCP = viaTCP[:0]
+		for _, bp := range batch {
+			packet := *bp
+			packets++
+			if !enableIPv6 && isIPv6Packet(packet) {
+				writeIPv6Unreachable(tun, packet)
+				continue
+			}
+			if debugLogging && (packets <= 8 || packets%1000 == 0) {
+				log.Printf("DEBUG: TUN -> OUT packet #%d (%d bytes, IPv%d, udpActive=%v)", packets, len(packet), packet[0]>>4, udpActive.Load())
+			}
+			if !udpActive.Load() {
+				viaTCP = append(viaTCP, packet)
+				continue
+			}
 			if err := ch.SendWithBuffer(packet, sendBuf); err != nil {
 				if isTemporaryNetworkError(err) {
 					continue
@@ -657,20 +669,21 @@ func copyTunToData(tun io.ReadWriter, ch *obsidian.UDPChannel, tunnel *obsidian.
 					log.Printf("udp send failed repeatedly (%d times): %v, falling back to TCP REALITY", fails, err)
 					udpActive.Store(false)
 				}
-				if err := tunnel.SendData(packet); err != nil {
-					return fmt.Errorf("tunnel send: %w", err)
-				}
+				viaTCP = append(viaTCP, packet)
 			} else {
 				udpFailCount.Store(0)
 				if udpPending.Load() == 0 {
 					udpPending.CompareAndSwap(0, time.Now().UnixNano())
 				}
 			}
-		} else {
-			if err := tunnel.SendData(packet); err != nil {
+		}
+		if len(viaTCP) > 0 {
+			if _, err := tunnel.SendDataBatch(viaTCP); err != nil {
+				reader.Release(batch)
 				return fmt.Errorf("tunnel send: %w", err)
 			}
 		}
+		reader.Release(batch)
 	}
 }
 

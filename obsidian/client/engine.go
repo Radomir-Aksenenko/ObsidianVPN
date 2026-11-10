@@ -753,29 +753,37 @@ func (s *Session) runConnection(tun io.ReadWriteCloser) error {
 }
 
 func (s *Session) copyTunToData(tun io.ReadWriter, ch *obsidian.UDPChannel, tunnel *obsidian.Tunnel, udpActive *atomic.Bool, tcpProto *string, udpPending *atomic.Int64) error {
-	buf := make([]byte, 2048)
 	sendBuf := make([]byte, 2048)
 	rejectBuf := make([]byte, obsidian.IPv6RejectBufSize)
 	var udpFailCount atomic.Int32
+	reader := NewTunBatchReader(tun)
+	defer reader.Close()
+	batch := make([]*[]byte, 0, UplinkBatchPackets)
+	viaTCP := make([][]byte, 0, UplinkBatchPackets)
 
 	for {
-		if s.isStopped() {
-			return nil
-		}
-		n, err := tun.Read(buf)
+		var err error
+		batch, err = reader.NextBatch(batch, s.stopCh)
 		if err != nil {
 			return fmt.Errorf("tun read: %w", err)
 		}
-		packet := buf[:n]
-		s.pktsSent.Add(1)
-		s.bytesSent.Add(uint64(n))
-
-		if !s.cfg.EnableIPv6 && isIPv6Packet(packet) {
-			s.rejectIPv6(tun, packet, rejectBuf)
-			continue
+		if batch == nil {
+			return nil
 		}
+		viaTCP = viaTCP[:0]
+		for _, bp := range batch {
+			packet := *bp
+			s.pktsSent.Add(1)
+			s.bytesSent.Add(uint64(len(packet)))
 
-		if udpActive.Load() {
+			if !s.cfg.EnableIPv6 && isIPv6Packet(packet) {
+				s.rejectIPv6(tun, packet, rejectBuf)
+				continue
+			}
+			if !udpActive.Load() {
+				viaTCP = append(viaTCP, packet)
+				continue
+			}
 			if err := ch.SendWithBuffer(packet, sendBuf); err != nil {
 				if isTemporaryNetworkError(err) {
 					continue
@@ -786,26 +794,25 @@ func (s *Session) copyTunToData(tun io.ReadWriter, ch *obsidian.UDPChannel, tunn
 					s.activeProto.Store(tcpProto)
 				}
 				// Best-effort relay over TCP; packet drop under congestion is standard IP behavior
-				_ = tunnel.SendData(packet)
+				viaTCP = append(viaTCP, packet)
 			} else {
 				udpFailCount.Store(0)
 				if udpPending.Load() == 0 {
 					udpPending.CompareAndSwap(0, time.Now().UnixNano())
 				}
 			}
-		} else {
-			if err := tunnel.SendData(packet); err != nil {
-				if isTemporaryNetworkError(err) {
-					continue
-				}
+		}
+		if len(viaTCP) > 0 {
+			if _, err := tunnel.SendDataBatch(viaTCP); err != nil && !isTemporaryNetworkError(err) {
 				select {
 				case <-tunnel.Done():
+					reader.Release(batch)
 					return io.EOF
 				default:
-					continue
 				}
 			}
 		}
+		reader.Release(batch)
 	}
 }
 
@@ -840,27 +847,38 @@ func (s *Session) copyUDPToTun(ch *obsidian.UDPChannel, tun io.Writer) error {
 }
 
 func (s *Session) copyTunToTunnel(tun io.ReadWriter, tunnel *obsidian.Tunnel) error {
-	buf := make([]byte, 2048)
 	rejectBuf := make([]byte, obsidian.IPv6RejectBufSize)
+	reader := NewTunBatchReader(tun)
+	defer reader.Close()
+	batch := make([]*[]byte, 0, UplinkBatchPackets)
+	pkts := make([][]byte, 0, UplinkBatchPackets)
 	for {
-		if s.isStopped() {
-			return nil
-		}
-		n, err := tun.Read(buf)
+		var err error
+		batch, err = reader.NextBatch(batch, s.stopCh)
 		if err != nil {
 			return fmt.Errorf("tun read: %w", err)
 		}
-		s.pktsSent.Add(1)
-		s.bytesSent.Add(uint64(n))
-
-		if !s.cfg.EnableIPv6 && isIPv6Packet(buf[:n]) {
-			s.rejectIPv6(tun, buf[:n], rejectBuf)
-			continue
+		if batch == nil {
+			return nil
 		}
-
-		if err := tunnel.SendData(buf[:n]); err != nil {
-			return fmt.Errorf("tunnel send: %w", err)
+		pkts = pkts[:0]
+		for _, bp := range batch {
+			packet := *bp
+			s.pktsSent.Add(1)
+			s.bytesSent.Add(uint64(len(packet)))
+			if !s.cfg.EnableIPv6 && isIPv6Packet(packet) {
+				s.rejectIPv6(tun, packet, rejectBuf)
+				continue
+			}
+			pkts = append(pkts, packet)
 		}
+		if len(pkts) > 0 {
+			if _, err := tunnel.SendDataBatch(pkts); err != nil {
+				reader.Release(batch)
+				return fmt.Errorf("tunnel send: %w", err)
+			}
+		}
+		reader.Release(batch)
 	}
 }
 
