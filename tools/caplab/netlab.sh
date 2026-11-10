@@ -14,6 +14,7 @@ DELAY=${DELAY:-25ms}
 LOSS=${LOSS:-0.5%}
 RATE=${RATE:-100mbit}
 T=${T:-10}
+SNI=${SNI:-www.microsoft.com}
 VERSIONS=${VERSIONS:-"rel r2"}
 MODES=${MODES:-"reality native"}
 TAG=${TAG:-$(echo "d${DELAY}-l${LOSS}-r${RATE}" | tr -d '%')}
@@ -23,6 +24,8 @@ mkdir -p "$RES"
 ns() { ip netns exec cli "$@"; }
 
 setup() {
+  pkill -f "$OUT/caph-" 2>/dev/null; pkill -x xray 2>/dev/null; pkill -f "$OUT/server-" 2>/dev/null
+  sleep 0.5
   ip netns del cli 2>/dev/null
   ip link del vh 2>/dev/null
   ip netns add cli
@@ -61,20 +64,24 @@ obsidian() { # version mode
   local srv='"host":"172.31.0.1","port":"8443","protocol_version":2,"tun_interface":"obtun0","tun_address":"10.8.0.1/24","mtu":1420,"disable_dns_proxy":true,"enable_udp_data":false,"profile":"fast-secure","jitter":"off","tcp_congestion":"bbr"'
   local cli='"server_host":"172.31.0.1","server_port":"8443","protocol_version":2,"tun_address":"10.8.0.2/24","dns":"10.8.0.1","mtu":1420,"enable_udp_data":false,"profile":"fast-secure","jitter":"off","fingerprint":"chrome"'
   if [ "$mode" = native ]; then
-    echo "{$srv,\"transport\":\"native-reality\",\"server_private_key\":\"$SPRIV\",\"server_public_key\":\"$SPUB\",\"reality_private_key\":\"$RPRIV\",\"reality_short_ids\":[\"$SID\"],\"reality_target\":\"www.microsoft.com:443\",\"reality_server_names\":[\"www.microsoft.com\"]}" > "$RES/$name.srv.json"
-    echo "{$cli,\"transport\":\"native-reality\",\"server_public_key\":\"$SPUB\",\"client_private_key\":\"$CPRIV\",\"reality_public_key\":\"$RPUB\",\"reality_short_id\":\"$SID\",\"reality_sni\":\"www.microsoft.com\",\"allow_direct_udp\":false}" > "$RES/$name.cli.json"
+    echo "{$srv,\"transport\":\"native-reality\",\"server_private_key\":\"$SPRIV\",\"server_public_key\":\"$SPUB\",\"reality_private_key\":\"$RPRIV\",\"reality_short_ids\":[\"$SID\"],\"reality_target\":\"${TARGET:-$SNI:443}\",\"reality_server_names\":[\"$SNI\"]}" > "$RES/$name.srv.json"
+    echo "{$cli,\"transport\":\"native-reality\",\"server_public_key\":\"$SPUB\",\"client_private_key\":\"$CPRIV\",\"reality_public_key\":\"$RPUB\",\"reality_short_id\":\"$SID\",\"reality_sni\":\"$SNI\",\"allow_direct_udp\":false}" > "$RES/$name.cli.json"
   else
-    echo "{$srv,\"server_private_key\":\"$SPRIV\",\"server_public_key\":\"$SPUB\",\"reality_target\":\"www.microsoft.com:443\",\"reality_server_names\":[\"www.microsoft.com\"],\"reality_auth_key\":\"$AUTH\"}" > "$RES/$name.srv.json"
-    echo "{$cli,\"server_public_key\":\"$SPUB\",\"client_private_key\":\"$CPRIV\",\"reality_enabled\":true,\"reality_sni\":\"www.microsoft.com\",\"reality_auth_key\":\"$AUTH\"}" > "$RES/$name.cli.json"
+    echo "{$srv,\"server_private_key\":\"$SPRIV\",\"server_public_key\":\"$SPUB\",\"reality_target\":\"${TARGET:-$SNI:443}\",\"reality_server_names\":[\"$SNI\"],\"reality_auth_key\":\"$AUTH\"}" > "$RES/$name.srv.json"
+    echo "{$cli,\"server_public_key\":\"$SPUB\",\"client_private_key\":\"$CPRIV\",\"reality_enabled\":true,\"reality_sni\":\"$SNI\",\"reality_auth_key\":\"$AUTH\"}" > "$RES/$name.cli.json"
   fi
   "$OUT/server-$v" -config "$RES/$name.srv.json" > "$RES/$name.server.log" 2>&1 &
   local spid=$!
-  sleep 1.5
+  # The native server probes the cover site for about 5 s before it accepts; a client that
+  # connected earlier would wait in the accept queue and inflate connect_ms.
+  for _ in $(seq 1 300); do grep -q "listening on" "$RES/$name.server.log" && break; sleep 0.05; done
+  sleep 0.3
   tcpdump -i vh -U -s "${SNAP:-0}" -w "$RES/$name.pcap" tcp port 8443 > /dev/null 2>&1 &
   local dpid=$!
   sleep 0.5
   local t0=$(date +%s%N)
-  ns env CAPH_TUN=ctun "$OUT/caph-$v" "$RES/$name.cli.json" > "$RES/$name.client.log" 2>&1 &
+  # Not through ns(): a backgrounded shell function would give the subshell's pid.
+  ip netns exec cli env CAPH_TUN=ctun ${CAPH_CPUPROFILE:+CAPH_CPUPROFILE=$RES/$name.cpu.pprof} "$OUT/caph-$v" "$RES/$name.cli.json" > "$RES/$name.client.log" 2>&1 &
   local cpid=$!
   for _ in $(seq 1 200); do grep -q "PHASE connected" "$RES/$name.client.log" && break; sleep 0.05; done
   local t1=$(date +%s%N)
@@ -94,6 +101,7 @@ obsidian() { # version mode
   kill -INT $spid; sleep 0.5
   kill -INT $dpid; sleep 0.5
   kill -9 $cpid $spid 2>/dev/null
+  wait $cpid $spid 2>/dev/null
 }
 
 xray() {
@@ -118,7 +126,7 @@ EOF
 EOF
   "$OUT/xray" run -c "$RES/$name.srv.json" > "$RES/$name.server.log" 2>&1 &
   local spid=$!
-  ns "$OUT/xray" run -c "$RES/$name.cli.json" > "$RES/$name.client.log" 2>&1 &
+  ip netns exec cli "$OUT/xray" run -c "$RES/$name.cli.json" > "$RES/$name.client.log" 2>&1 &
   local cpid=$!
   sleep 1.5
   tcpdump -i vh -U -s "${SNAP:-0}" -w "$RES/$name.pcap" tcp port 9443 > /dev/null 2>&1 &

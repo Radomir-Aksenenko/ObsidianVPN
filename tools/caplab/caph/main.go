@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"runtime/pprof"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -120,7 +121,8 @@ func main() {
 	if err := json.Unmarshal(f, &cfg); err != nil {
 		log.Fatal(err)
 	}
-	s, err := client.NewSession(&cfg, client.WithAutoReconnect(false))
+	s, err := client.NewSession(&cfg, client.WithAutoReconnect(false),
+		client.WithStatusCallback(func(st, detail string) { log.Printf("status %s: %s", st, detail) }))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -140,6 +142,14 @@ func main() {
 			time.Sleep(50 * time.Millisecond)
 		}
 		mark("connected")
+		if path := os.Getenv("CAPH_CPUPROFILE"); path != "" {
+			f, err := os.Create(path)
+			if err != nil {
+				log.Fatal(err)
+			}
+			_ = pprof.StartCPUProfile(f)
+			defer func() { pprof.StopCPUProfile(); f.Close() }()
+		}
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 		<-sig
