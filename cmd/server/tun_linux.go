@@ -74,22 +74,52 @@ func openTUN(cfg Config) io.ReadWriteCloser {
 		log.Fatalf("invalid egress_ip6 %q: %v", cfg.EgressIP6, err)
 	}
 
-	fd, err := syscall.Open(tunDevice, syscall.O_RDWR, 0)
-	if err != nil {
-		log.Printf("open tun device: %v", err)
-		return nil
+	// mtu is the transport limit; it stays the same in both modes.
+	mtu := tunnelMTUFor(cfg.MTU)
+	normalize := !cfg.DisableMSSNormalize
+	linkMTU := mtu
+	if normalize {
+		linkMTU = normalizedTunMTU
 	}
 
-	var req ifReq
-	copy(req.Name[:], iface)
-	req.Flags = iffTUN | iffNOPI
+	// Prefer a TUN with segmentation offloads: batched reads and writes cost far fewer system
+	// calls. Kernels or containers that refuse TUNSETOFFLOAD get the plain device.
+	var offload *offloadTUN
+	fd := -1
+	closeDev := func() {
+		if offload != nil {
+			offload.Close()
+		} else {
+			syscall.Close(fd)
+		}
+	}
+	if !cfg.DisableTUNOffload {
+		var err error
+		offload, err = openOffloadTUN(iface, linkMTU)
+		if err != nil {
+			log.Printf("TUN offloads unavailable, using a plain TUN: %v", err)
+			offload = nil
+		}
+	}
+	if offload == nil {
+		var err error
+		fd, err = syscall.Open(tunDevice, syscall.O_RDWR, 0)
+		if err != nil {
+			log.Printf("open tun device: %v", err)
+			return nil
+		}
 
-	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL,
-		uintptr(fd), ioctlTUNSETIFF, uintptr(unsafe.Pointer(&req)))
-	if errno != 0 {
-		syscall.Close(fd)
-		log.Printf("ioctl TUNSETIFF: %v", errno)
-		return nil
+		var req ifReq
+		copy(req.Name[:], iface)
+		req.Flags = iffTUN | iffNOPI
+
+		_, _, errno := syscall.Syscall(syscall.SYS_IOCTL,
+			uintptr(fd), ioctlTUNSETIFF, uintptr(unsafe.Pointer(&req)))
+		if errno != 0 {
+			syscall.Close(fd)
+			log.Printf("ioctl TUNSETIFF: %v", errno)
+			return nil
+		}
 	}
 
 	// Enable IP forwarding (IPv4, and optionally IPv6)
@@ -103,7 +133,7 @@ func openTUN(cfg Config) io.ReadWriteCloser {
 	// they do not, the TUN fd exists but writes fail with EIO.
 	if err := runCmd("ip", "link", "set", iface, "up"); err != nil {
 		log.Printf("configure tun link up: %v", err)
-		syscall.Close(fd)
+		closeDev()
 		return nil
 	}
 	if err := runCmd("ip", "addr", "flush", "dev", iface); err != nil {
@@ -111,7 +141,7 @@ func openTUN(cfg Config) io.ReadWriteCloser {
 	}
 	if err := runCmd("ip", "addr", "add", tunAddr, "dev", iface); err != nil {
 		log.Printf("configure tun addr: %v", err)
-		syscall.Close(fd)
+		closeDev()
 		return nil
 	}
 	// Dual-Stack IPv6 in-tunnel prefix
@@ -121,13 +151,6 @@ func openTUN(cfg Config) io.ReadWriteCloser {
 		if err := runCmd("ip", "-6", "addr", "add", tunAddr6, "dev", iface); err != nil {
 			log.Printf("configure tun ipv6 addr: %v", err)
 		}
-	}
-	// mtu is the transport limit; it stays the same in both modes.
-	mtu := tunnelMTUFor(cfg.MTU)
-	normalize := !cfg.DisableMSSNormalize
-	linkMTU := mtu
-	if normalize {
-		linkMTU = normalizedTunMTU
 	}
 	if err := runCmd("ip", "link", "set", iface, "mtu", fmt.Sprintf("%d", linkMTU)); err != nil {
 		log.Printf("configure tun mtu: %v", err)
@@ -256,12 +279,16 @@ func openTUN(cfg Config) io.ReadWriteCloser {
 		log.Printf("TUN %s up, IPv4=%s, IPv6=disabled, NAT via %s", iface, tunAddr, outIface)
 	}
 
-	// Use os.File + non-blocking mode so Go's runtime poller manages the fd.
-	// This prevents TUN reads from blocking OS threads.
-	syscall.SetNonblock(fd, true)
-	file := os.NewFile(uintptr(fd), iface)
-
-	t := &tunFile{file: file, iface: iface}
+	var t io.ReadWriteCloser
+	if offload != nil {
+		log.Printf("TUN %s: segmentation offloads on, batch %d", iface, offload.BatchSize())
+		t = offload
+	} else {
+		// Use os.File + non-blocking mode so Go's runtime poller manages the fd.
+		// This prevents TUN reads from blocking OS threads.
+		syscall.SetNonblock(fd, true)
+		t = &tunFile{file: os.NewFile(uintptr(fd), iface), iface: iface}
+	}
 
 	go func() {
 		ch := make(chan os.Signal, 1)

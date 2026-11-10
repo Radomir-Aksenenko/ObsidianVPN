@@ -115,6 +115,10 @@ func (r *tunRouter) configureMSS(tunnelMTU int, normalize bool) {
 }
 
 func (r *tunRouter) run() {
+	if br, ok := r.tun.(tunBatchReader); ok && br.BatchSize() > 1 {
+		r.runBatch(br)
+		return
+	}
 	buf := make([]byte, 65535)
 	for {
 		n, err := r.tun.Read(buf)
@@ -122,29 +126,55 @@ func (r *tunRouter) run() {
 			log.Printf("TUN router read error: %v", err)
 			return
 		}
-		packet := buf[:n]
-		sess := r.sessionForPacket(packet)
-		if sess == nil {
-			continue
-		}
-		sess.restoreDownlink(packet)
-		if r.normalizeMSS {
-			limit := int(sess.mtu.Load())
-			clampDownlinkSYN(packet, limit)
-			if n > limit {
-				sendOversized(sess, packet, limit)
-				continue
-			}
-		}
+		r.route(buf[:n])
+	}
+}
 
-		copyPacket := getRoutedPacket(n)
-		copy(copyPacket, packet)
-		if !sess.enqueue(copyPacket) {
-			if dropLog.Ready() {
-				log.Printf("session %s: outbound queue full, dropping packet len=%d", sess.sid, len(copyPacket))
-			}
-			putRoutedPacket(copyPacket)
+// runBatch reads with a TUN that splits GSO super-packets: one read returns up to BatchSize
+// segments.
+func (r *tunRouter) runBatch(br tunBatchReader) {
+	bufs := make([][]byte, br.BatchSize())
+	bufs[0] = make([]byte, 65535) // a packet that is not GSO lands here whole
+	for i := 1; i < len(bufs); i++ {
+		bufs[i] = make([]byte, 4096) // GSO segments are at most the link MTU
+	}
+	sizes := make([]int, len(bufs))
+	for {
+		n, err := br.ReadBatch(bufs, sizes)
+		if err != nil {
+			log.Printf("TUN router read error: %v", err)
+			return
 		}
+		for i := 0; i < n; i++ {
+			r.route(bufs[i][:sizes[i]])
+		}
+	}
+}
+
+// route queues one downlink packet read from the TUN for its session.
+func (r *tunRouter) route(packet []byte) {
+	n := len(packet)
+	sess := r.sessionForPacket(packet)
+	if sess == nil {
+		return
+	}
+	sess.restoreDownlink(packet)
+	if r.normalizeMSS {
+		limit := int(sess.mtu.Load())
+		clampDownlinkSYN(packet, limit)
+		if n > limit {
+			sendOversized(sess, packet, limit)
+			return
+		}
+	}
+
+	copyPacket := getRoutedPacket(n)
+	copy(copyPacket, packet)
+	if !sess.enqueue(copyPacket) {
+		if dropLog.Ready() {
+			log.Printf("session %s: outbound queue full, dropping packet len=%d", sess.sid, len(copyPacket))
+		}
+		putRoutedPacket(copyPacket)
 	}
 }
 

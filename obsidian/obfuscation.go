@@ -492,6 +492,25 @@ func (t *Tunnel) RecvDataInto(ctx context.Context, dst []byte) (int, error) {
 	return pkt.n, nil
 }
 
+// TryRecvDataInto copies the next DATA packet into dst if one is already queued and reports
+// false without blocking otherwise. Receivers use it to drain a burst into one batch.
+func (t *Tunnel) TryRecvDataInto(dst []byte) (int, bool, error) {
+	select {
+	case pkt, ok := <-t.dataIn:
+		if !ok {
+			return 0, false, io.EOF
+		}
+		defer putTunnelPayload(pkt.buf)
+		if len(dst) < pkt.n {
+			return 0, false, io.ErrShortBuffer
+		}
+		copy(dst, (*pkt.buf)[:pkt.n])
+		return pkt.n, true, nil
+	default:
+		return 0, false, nil
+	}
+}
+
 // RecvData блокируется до получения следующего DATA пакета.
 // ctx может быть nil — тогда используется только внутренний контекст туннеля.
 func (t *Tunnel) RecvData(ctx context.Context) ([]byte, error) {

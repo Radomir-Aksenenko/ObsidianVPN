@@ -75,6 +75,7 @@ type Config struct {
 	BucketMTU             int      `json:"bucket_mtu,omitempty"`
 	EnableIPv6            bool     `json:"enable_ipv6,omitempty"`
 	DisableMSSNormalize   bool     `json:"disable_mss_normalize"`
+	DisableTUNOffload     bool     `json:"disable_tun_offload,omitempty"`
 	EgressIP              string   `json:"egress_ip"`
 	EgressIP6             string   `json:"egress_ip6"`
 }
@@ -670,6 +671,10 @@ func echoLoop(tunnel *obsidian.Tunnel) {
 }
 
 func udpClientToTUN(sess *obsidian.UDPSession, tun io.Writer, sid string, lastRecv *atomic.Int64) {
+	if sink, ok := tun.(tunBatchSink); ok {
+		udpClientToTUNBatch(sess, sink, sid, lastRecv)
+		return
+	}
 	batch := make([]obsidian.UDPPacket, 32)
 	for {
 		n, err := sess.RecvBatch(batch)
@@ -752,6 +757,14 @@ func looksLikeIPv4MulticastNameQuery(packet []byte) bool {
 }
 
 func tunnelToTUN(tunnel *obsidian.Tunnel, tun io.Writer, sid string, lastRecv ...*atomic.Int64) {
+	if sink, ok := tun.(tunBatchSink); ok {
+		var lr *atomic.Int64
+		if len(lastRecv) > 0 {
+			lr = lastRecv[0]
+		}
+		tunnelToTUNBatch(tunnel, sink, sid, lr)
+		return
+	}
 	buf := make([]byte, 2048)
 	for {
 		n, err := tunnel.RecvDataInto(nil, buf)

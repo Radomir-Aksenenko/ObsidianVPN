@@ -70,7 +70,7 @@ obsidian() { # version mode
     echo "{$srv,\"server_private_key\":\"$SPRIV\",\"server_public_key\":\"$SPUB\",\"reality_target\":\"${TARGET:-$SNI:443}\",\"reality_server_names\":[\"$SNI\"],\"reality_auth_key\":\"$AUTH\"}" > "$RES/$name.srv.json"
     echo "{$cli,\"server_public_key\":\"$SPUB\",\"client_private_key\":\"$CPRIV\",\"reality_enabled\":true,\"reality_sni\":\"$SNI\",\"reality_auth_key\":\"$AUTH\"}" > "$RES/$name.cli.json"
   fi
-  "$OUT/server-$v" -config "$RES/$name.srv.json" > "$RES/$name.server.log" 2>&1 &
+  ${SERVER_PROFILE_SECS:+env OBSIDIAN_CPUPROFILE=$RES/$name.server.pprof OBSIDIAN_CPUPROFILE_SECS=$SERVER_PROFILE_SECS} "$OUT/server-$v" -config "$RES/$name.srv.json" > "$RES/$name.server.log" 2>&1 &
   local spid=$!
   # The native server probes the cover site for about 5 s before it accepts; a client that
   # connected earlier would wait in the accept queue and inflate connect_ms.
@@ -115,14 +115,14 @@ xray() {
 {"log":{"loglevel":"warning"},
  "inbounds":[{"listen":"172.31.0.1","port":9443,"protocol":"vless",
    "settings":{"clients":[{"id":"$uuid","flow":"xtls-rprx-vision"}],"decryption":"none"},
-   "streamSettings":{"network":"tcp","security":"reality","realitySettings":{"dest":"www.microsoft.com:443","serverNames":["www.microsoft.com"],"privateKey":"$xpriv","shortIds":["$sid"]}}}],
+   "streamSettings":{"network":"tcp","sockopt":{"tcpCongestion":"bbr"},"security":"reality","realitySettings":{"dest":"www.microsoft.com:443","serverNames":["www.microsoft.com"],"privateKey":"$xpriv","shortIds":["$sid"]}}}],
  "outbounds":[{"protocol":"freedom","settings":{"finalRules":[{"action":"allow","ip":["127.0.0.1/32"]}]}}]}
 EOF
   cat > "$RES/$name.cli.json" <<EOF
 {"log":{"loglevel":"warning"},
  "inbounds":[{"listen":"127.0.0.1","port":5201,"protocol":"dokodemo-door","settings":{"address":"127.0.0.1","port":5201,"network":"tcp"}}],
  "outbounds":[{"protocol":"vless","settings":{"vnext":[{"address":"172.31.0.1","port":9443,"users":[{"id":"$uuid","flow":"xtls-rprx-vision","encryption":"none"}]}]},
-   "streamSettings":{"network":"tcp","security":"reality","realitySettings":{"serverName":"www.microsoft.com","fingerprint":"chrome","publicKey":"$xpub","shortId":"$sid"}}}]}
+   "streamSettings":{"network":"tcp","sockopt":{"tcpCongestion":"bbr"},"security":"reality","realitySettings":{"serverName":"www.microsoft.com","fingerprint":"chrome","publicKey":"$xpub","shortId":"$sid"}}}]}
 EOF
   "$OUT/xray" run -c "$RES/$name.srv.json" > "$RES/$name.server.log" 2>&1 &
   local spid=$!
@@ -158,6 +158,28 @@ wireguard() {
   ip link del wgs; ns ip link del wgc
 }
 
+wggo() {
+  local name=wireguard-go
+  [ -x "$OUT/wireguard-go" ] || { echo "$name: binary missing"; return; }
+  local sk ck; sk=$(wg genkey); ck=$(wg genkey)
+  WG_PROCESS_FOREGROUND=1 "$OUT/wireguard-go" wgs > "$RES/$name.server.log" 2>&1 &
+  local spid=$!
+  ip netns exec cli env WG_PROCESS_FOREGROUND=1 "$OUT/wireguard-go" wgc > "$RES/$name.client.log" 2>&1 &
+  local cpid=$!
+  sleep 1
+  wg set wgs listen-port 51821 private-key <(echo "$sk") peer "$(echo "$ck" | wg pubkey)" allowed-ips 10.10.0.2/32
+  ip addr add 10.10.0.1/24 dev wgs; ip link set wgs up mtu 1420
+  ns wg set wgc private-key <(echo "$ck") peer "$(echo "$sk" | wg pubkey)" endpoint 172.31.0.1:51821 allowed-ips 10.10.0.0/24
+  ns ip addr add 10.10.0.2/24 dev wgc; ns ip link set wgc up mtu 1420
+  sleep 0.5
+  local c0=$(( $(cpu_of $cpid) + $(cpu_of $spid) ))
+  local down=$(run_iperf "$name.down" 10.10.0.1 -R)
+  local up=$(run_iperf "$name.up" 10.10.0.1)
+  local c1=$(( $(cpu_of $cpid) + $(cpu_of $spid) ))
+  echo "$name down_mbit=$down up_mbit=$up cpu_s=$(echo "scale=2; ($c1-$c0)/100" | bc)" | tee -a "$RES/summary.txt"
+  kill $cpid $spid; wait $cpid $spid 2>/dev/null
+}
+
 setup
 keys
 : > "$RES/summary.txt"
@@ -165,4 +187,5 @@ echo "link: delay $DELAY each way, loss $LOSS, rate $RATE, iperf $T s" | tee -a 
 for v in $VERSIONS; do for m in $MODES; do obsidian "$v" "$m"; done; done
 [ "${SKIP_XRAY:-}" ] || xray
 [ "${SKIP_WG:-}" ] || wireguard
+[ "${SKIP_WGGO:-}" ] || wggo
 pkill -x iperf3
