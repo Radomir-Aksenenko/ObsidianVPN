@@ -487,7 +487,11 @@ func handleClient(conn net.Conn, priv, pub [obsidian.KeySize]byte,
 	}
 	conn.SetReadDeadline(time.Time{})
 
-	if replayCache.Seen(helloData) {
+	replayKey, ok := obsidian.ClientHelloReplayKey(helloData)
+	if !ok {
+		replayKey = helloData // malformed; ProcessClientHello rejects it anyway
+	}
+	if replayCache.Seen(replayKey) {
 		log.Printf("client hello replay from %s", conn.RemoteAddr())
 		return
 	}

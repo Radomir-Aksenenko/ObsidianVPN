@@ -33,7 +33,9 @@ import (
 	"time"
 )
 
-const replayWindowSec = 30
+// replayWindowSec bounds client clock skew. The server replay cache must keep entries for at
+// least twice this long (cmd/server keeps them two minutes).
+const replayWindowSec = 60
 
 const (
 	helloNonceSize     = 16
@@ -687,6 +689,24 @@ func (s *ServerHandshake) ProcessClientHello(data []byte) ([]byte, *StreamFramer
 	framer.HeaderCfg = s.ObfCfg.Headers
 	s.ephKeypair.Zero()
 	return hello, framer, nil
+}
+
+// ClientHelloReplayKey returns the bytes that identify a client hello for replay detection:
+// client_ephemeral_pub || salt. Both feed the key schedule, so changing either breaks the hello.
+// The pre-padding and S1 padding are not authenticated, so hashing the whole hello let a replay
+// with one flipped padding byte past the cache. ok is false if the hello is too short to parse.
+func ClientHelloReplayKey(hello []byte) (key []byte, ok bool) {
+	if len(hello) < 1 {
+		return nil, false
+	}
+	off := 1 + int(hello[0])
+	if len(hello) < off+KeySize+MLKEM768EncapsulationKeySize+32 {
+		return nil, false
+	}
+	key = make([]byte, 0, KeySize+32)
+	key = append(key, hello[off:off+KeySize]...)
+	salt := off + KeySize + MLKEM768EncapsulationKeySize
+	return append(key, hello[salt:salt+32]...), true
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
