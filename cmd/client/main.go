@@ -409,6 +409,9 @@ func runSession(cfg Config, serverPub [obsidian.KeySize]byte, clientStatic *obsi
 			// Only a record-mode server is new enough for the masked datagram format.
 			udpCh.UseMaskedFormat(obsidian.RealityRouteMaskKey(authKeyBytes))
 		}
+		if err := client.EnableClientRekey(tunnel, hs.SessionKeys, udpCh); err != nil {
+			return err
+		}
 		log.Printf("UDP data channel: %s:%s (bucket_padding=%v)", cfg.ServerHost, cfg.UDPPort, udpCh.UseBucketPadding)
 		// Taken before warmup so that warmup echoes count as proof the UDP path works.
 		udpStartNano := time.Now().UnixNano()
@@ -514,6 +517,9 @@ func runSession(cfg Config, serverPub [obsidian.KeySize]byte, clientStatic *obsi
 		}
 	}
 
+	if err := client.EnableClientRekey(tunnel, hs.SessionKeys, nil); err != nil {
+		return err
+	}
 	errCh := make(chan error, 2)
 	go func() { errCh <- copyTunToTunnel(tun, tunnel) }()
 	go func() { errCh <- copyTunnelToTun(tunnel, tun) }()

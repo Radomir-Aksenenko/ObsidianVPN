@@ -529,6 +529,10 @@ func handleClient(conn net.Conn, priv, pub [obsidian.KeySize]byte,
 
 	if globalTUN == nil || tunRoutes == nil {
 		log.Printf("session %s: TUN unavailable, echo mode", sessionID)
+		if err := tunnel.EnableRekey(hs.SessionKeys, false, obsidian.RekeyConfig{}, obsidian.RekeyHooks{}); err != nil {
+			log.Printf("session %s: enable rekey: %v", sessionID, err)
+			return
+		}
 		echoLoop(tunnel)
 		return
 	}
@@ -546,6 +550,14 @@ func handleClient(conn net.Conn, priv, pub [obsidian.KeySize]byte,
 			return
 		}
 		defer sess.Close()
+		if err := tunnel.EnableRekey(hs.SessionKeys, false, obsidian.RekeyConfig{}, obsidian.RekeyHooks{
+			AcceptNext: func(k *obsidian.SessionKeys) error { return sess.AcceptEpoch(obsidian.DeriveUDPKeys(k, false)) },
+			Commit:     func(k *obsidian.SessionKeys) error { return sess.CommitSendEpoch(obsidian.DeriveUDPKeys(k, false)) },
+			DropPrev:   sess.DropPrevEpoch,
+		}); err != nil {
+			log.Printf("session %s: enable rekey: %v", sessionID, err)
+			return
+		}
 		var lastUDPRecv atomic.Int64
 		var lastTCPRecv atomic.Int64
 
@@ -600,6 +612,10 @@ func handleClient(conn net.Conn, priv, pub [obsidian.KeySize]byte,
 		}
 	} else {
 		log.Printf("session %s: TCP relay started", sessionID)
+		if err := tunnel.EnableRekey(hs.SessionKeys, false, obsidian.RekeyConfig{}, obsidian.RekeyHooks{}); err != nil {
+			log.Printf("session %s: enable rekey: %v", sessionID, err)
+			return
+		}
 		route := tunRoutes.registerSession(sessionID, tunnel.SendData)
 		route.setBatchSender(tunnel.SendDataBatch)
 		route.setIdentity(hs.ClientStaticPub())

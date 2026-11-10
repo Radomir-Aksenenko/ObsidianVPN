@@ -267,6 +267,12 @@ type Tunnel struct {
 	maxPackets       uint64
 	packetCount      atomic.Uint64
 	hsPad            bool
+	// The session lifetime limits count from the start of the current key epoch, so a tunnel
+	// that rekeys (rekey.go) is never closed by them.
+	epochStartNano    atomic.Int64
+	epochStartPackets atomic.Uint64
+	rekey             atomic.Pointer[tunnelRekey]
+	peerRekeyCapable  atomic.Bool
 	hsBudget         handshakePadBudget // guarded by sendMu
 
 	ctx    context.Context
@@ -316,6 +322,7 @@ func NewTunnel(conn net.Conn, framer *StreamFramer, cfg TunnelConfig) *Tunnel {
 		cancel:      cancel,
 	}
 	t.lastAuthNano.Store(now.UnixNano())
+	t.epochStartNano.Store(now.UnixNano())
 
 	t.framer.PaddingCfg.DataMin = cfg.DataPadMin
 	t.framer.PaddingCfg.DataMax = cfg.DataPadMax
@@ -550,10 +557,10 @@ func (t *Tunnel) sessionExpired(count uint64) bool {
 	if count&1023 != 0 {
 		return false
 	}
-	if t.maxDuration > 0 && time.Since(t.createdAt) >= t.maxDuration {
+	if t.maxDuration > 0 && time.Since(time.Unix(0, t.epochStartNano.Load())) >= t.maxDuration {
 		return true
 	}
-	if t.maxPackets > 0 && count >= t.maxPackets {
+	if t.maxPackets > 0 && count-t.epochStartPackets.Load() >= t.maxPackets {
 		return true
 	}
 	return false
@@ -686,6 +693,16 @@ func (t *Tunnel) recvLoop() {
 		case PacketClose:
 			putTunnelPayload(pBuf)
 			return
+		case PacketRekey:
+			err := t.handleRekey((*pBuf)[:payLen])
+			putTunnelPayload(pBuf)
+			if err != nil {
+				log.Printf("tunnel rekey: %v", err)
+				return
+			}
+		case PacketNoise:
+			t.noteNoise((*pBuf)[:payLen])
+			putTunnelPayload(pBuf)
 		default:
 			putTunnelPayload(pBuf)
 		}

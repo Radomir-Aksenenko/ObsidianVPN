@@ -618,6 +618,9 @@ func (s *Session) runConnection(tun io.ReadWriteCloser) error {
 			// Only a record-mode server is new enough for the masked datagram format.
 			udpCh.UseMaskedFormat(obsidian.RealityRouteMaskKey(transportCfg.RealityAuthKey))
 		}
+		if err := EnableClientRekey(tunnel, hs.SessionKeys, udpCh); err != nil {
+			return err
+		}
 		// Taken before warmup so that warmup echoes count as proof the UDP path works.
 		udpStartNano := time.Now().UnixNano()
 		warmupUDPAddress(udpCh)
@@ -736,6 +739,9 @@ func (s *Session) runConnection(tun io.ReadWriteCloser) error {
 	}
 
 	// TCP fallback / TCP-only mode
+	if err := EnableClientRekey(tunnel, hs.SessionKeys, nil); err != nil {
+		return err
+	}
 	tcpProto := "TCP"
 	s.activeProto.Store(&tcpProto)
 	errCh := make(chan error, 2)
@@ -1034,4 +1040,17 @@ func MakeObfConfig(cfg obsidian.ClientConfig, oc obsidian.ObfuscationConfig) obs
 		}
 	}
 	return oc
+}
+
+// EnableClientRekey starts in-tunnel rekeying; the UDP channel, if any, follows each new epoch.
+func EnableClientRekey(tunnel *obsidian.Tunnel, keys *obsidian.SessionKeys, ch *obsidian.UDPChannel) error {
+	hooks := obsidian.RekeyHooks{}
+	if ch != nil {
+		hooks.Commit = func(k *obsidian.SessionKeys) error { return ch.RatchetEpoch(obsidian.DeriveUDPKeys(k, true)) }
+		hooks.DropPrev = ch.DropPrevEpoch
+	}
+	if err := tunnel.EnableRekey(keys, true, obsidian.RekeyConfig{}, hooks); err != nil {
+		return fmt.Errorf("enable rekey: %w", err)
+	}
+	return nil
 }

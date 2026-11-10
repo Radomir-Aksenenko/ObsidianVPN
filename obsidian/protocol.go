@@ -39,6 +39,9 @@ const (
 	PacketNoise     PacketType = 0x03
 	PacketHandshake PacketType = 0x04
 	PacketClose     PacketType = 0x05
+	// PacketRekey carries the in-tunnel key exchange (rekey.go). Cores that predate it never
+	// receive one: a client only starts a rekey after the server announced support.
+	PacketRekey PacketType = 0x06
 )
 
 const obsidianVersion = 0x02
@@ -78,6 +81,7 @@ type HeaderConfig struct {
 	Noise     HeaderRange // вспомогательный
 	Handshake HeaderRange // H1/H2 аналог (используется в handshake пакетах)
 	Close     HeaderRange
+	Rekey     HeaderRange
 }
 
 // DefaultHeaderConfig — диапазоны по умолчанию (не пересекаются, широкие).
@@ -88,13 +92,14 @@ func DefaultHeaderConfig() HeaderConfig {
 		Noise:     HeaderRange{0x30000000, 0x3FFFFFFF},
 		Handshake: HeaderRange{0x40000000, 0x4FFFFFFF},
 		Close:     HeaderRange{0x50000000, 0x5FFFFFFF},
+		Rekey:     HeaderRange{0x60000000, 0x6FFFFFFF},
 	}
 }
 
 // Validate проверяет что диапазоны не пересекаются.
 func (hc *HeaderConfig) Validate() error {
-	ranges := []HeaderRange{hc.Data, hc.Keepalive, hc.Noise, hc.Handshake, hc.Close}
-	names := []string{"Data", "Keepalive", "Noise", "Handshake", "Close"}
+	ranges := []HeaderRange{hc.Data, hc.Keepalive, hc.Noise, hc.Handshake, hc.Close, hc.Rekey}
+	names := []string{"Data", "Keepalive", "Noise", "Handshake", "Close", "Rekey"}
 	for i := 0; i < len(ranges); i++ {
 		for j := i + 1; j < len(ranges); j++ {
 			a, b := ranges[i], ranges[j]
@@ -120,6 +125,8 @@ func (hc *HeaderConfig) typeIDToPacketType(id uint32) (PacketType, error) {
 		return PacketHandshake, nil
 	case hc.Close.Contains(id):
 		return PacketClose, nil
+	case hc.Rekey.Max != 0 && hc.Rekey.Contains(id):
+		return PacketRekey, nil
 	default:
 		return 0, fmt.Errorf("unknown type-id: 0x%08x", id)
 	}
@@ -137,6 +144,8 @@ func (hc *HeaderConfig) rangeFor(pt PacketType) HeaderRange {
 		return hc.Handshake
 	case PacketClose:
 		return hc.Close
+	case PacketRekey:
+		return hc.Rekey
 	default:
 		return hc.Data
 	}

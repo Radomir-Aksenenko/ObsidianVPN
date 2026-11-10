@@ -161,6 +161,9 @@ type SessionKeys struct {
 	// DynamicMagic — уникальный 16-байтовый magic производный от сессии.
 	// Каждое соединение имеет свой magic — DPI не может написать универсальное правило.
 	DynamicMagic [16]byte
+	// ChainKey carries the session secret into in-tunnel rekeys (see DeriveRekeyedKeys). It is
+	// never used to encrypt anything itself.
+	ChainKey [KeySize]byte
 }
 
 func (sk *SessionKeys) Zero() {
@@ -185,7 +188,13 @@ func (sk *SessionKeys) Zero() {
 	for i := range sk.DynamicMagic {
 		sk.DynamicMagic[i] = 0
 	}
+	clear(sk.ChainKey[:])
 }
+
+// sessionKeyMaterialSize is client_key(32) + server_key(32) + client_iv(12) + server_iv(12) +
+// session_id(16) + dynamic_magic(16) + chain_key(32). HKDF output is a stream, so the first 120
+// bytes are the same as before ChainKey was added.
+const sessionKeyMaterialSize = 152
 
 func DeriveKeys(sharedSecret [KeySize]byte, salt []byte, clientPub, serverPub [KeySize]byte) (*SessionKeys, error) {
 	info := make([]byte, 0, 11+KeySize+KeySize)
@@ -195,8 +204,7 @@ func DeriveKeys(sharedSecret [KeySize]byte, salt []byte, clientPub, serverPub [K
 
 	r := hkdf.New(sha256.New, sharedSecret[:], salt, info)
 
-	// client_key(32) + server_key(32) + client_iv(12) + server_iv(12) + session_id(16) + dynamic_magic(16) = 120
-	buf := make([]byte, 32+32+12+12+16+16)
+	buf := make([]byte, sessionKeyMaterialSize)
 	if _, err := io.ReadFull(r, buf); err != nil {
 		return nil, err
 	}
@@ -208,6 +216,8 @@ func DeriveKeys(sharedSecret [KeySize]byte, salt []byte, clientPub, serverPub [K
 	copy(sk.ServerIV[:], buf[76:88])
 	copy(sk.SessionID[:], buf[88:104])
 	copy(sk.DynamicMagic[:], buf[104:120])
+	copy(sk.ChainKey[:], buf[120:152])
+	clear(buf)
 	return sk, nil
 }
 
@@ -391,7 +401,7 @@ func DeriveNextEpochKeys(currentKeys *SessionKeys, epoch uint64) (*SessionKeys, 
 	info := []byte("obsidian_epoch_ratchet_v2")
 	r := hkdf.New(sha256.New, ikm, salt[:], info)
 
-	buf := make([]byte, 32+32+12+12+16+16)
+	buf := make([]byte, sessionKeyMaterialSize)
 	if _, err := io.ReadFull(r, buf); err != nil {
 		return nil, fmt.Errorf("epoch key expansion: %w", err)
 	}
@@ -403,6 +413,8 @@ func DeriveNextEpochKeys(currentKeys *SessionKeys, epoch uint64) (*SessionKeys, 
 	copy(sk.ServerIV[:], buf[76:88])
 	copy(sk.SessionID[:], buf[88:104])
 	copy(sk.DynamicMagic[:], buf[104:120])
+	copy(sk.ChainKey[:], buf[120:152])
+	clear(buf)
 	return sk, nil
 }
 
