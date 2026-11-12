@@ -360,6 +360,8 @@ type UDPChannel struct {
 	sendCtr          atomic.Uint64
 	replay           replayWindow
 	lastAuthRecvNano atomic.Int64
+	// emptyRecv counts authenticated empty datagrams: the server's echoes of our probes.
+	emptyRecv        atomic.Uint64
 	EnableSTUN       bool
 	EnableSRTP       bool
 	ssrc             uint32
@@ -643,7 +645,11 @@ func (ch *UDPChannel) Recv(dst []byte) (int, error) {
 		ch.lastAuthRecvNano.Store(time.Now().UnixNano())
 		if ch.TrafficPadding {
 			actual, ok := unshapeUDPPayload(plain)
-			if !ok || len(actual) == 0 {
+			if !ok {
+				continue
+			}
+			if len(actual) == 0 {
+				ch.emptyRecv.Add(1)
 				continue
 			}
 			copy(dst, actual)
@@ -660,6 +666,7 @@ func (ch *UDPChannel) Recv(dst []byte) (int, error) {
 		}
 
 		if len(plain) == 0 {
+			ch.emptyRecv.Add(1)
 			continue
 		}
 
@@ -675,6 +682,12 @@ func (ch *UDPChannel) Close() error {
 // including empty keepalive echoes that Recv does not return. 0 if none arrived yet.
 func (ch *UDPChannel) LastAuthRecvNano() int64 {
 	return ch.lastAuthRecvNano.Load()
+}
+
+// EchoCount returns how many authenticated empty datagrams arrived. The server sends one for
+// every empty probe it receives, so probes sent against echoes back measure round-trip loss.
+func (ch *UDPChannel) EchoCount() uint64 {
+	return ch.emptyRecv.Load()
 }
 
 // ── UDPMux (server-side, one shared socket, many sessions) ───────────────────

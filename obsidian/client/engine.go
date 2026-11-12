@@ -374,11 +374,6 @@ func (s *Session) setStatus(st, detail string) {
 	}
 }
 
-const (
-	UDPProbeAfter = 2500 * time.Millisecond
-	UDPDeadAfter  = 8 * time.Second
-)
-
 var ErrUDPStalled = errors.New("udp data path stalled")
 
 type UDPHealthAction int
@@ -621,20 +616,11 @@ func (s *Session) runConnection(tun io.ReadWriteCloser) error {
 		if err := EnableClientRekey(tunnel, hs.SessionKeys, udpCh); err != nil {
 			return err
 		}
-		// Taken before warmup so that warmup echoes count as proof the UDP path works.
-		udpStartNano := time.Now().UnixNano()
-		warmupUDPAddress(udpCh)
-
+		// Data goes over TCP until UDP has answered (see UDPPath).
+		path := NewUDPPath(time.Now())
 		udpProto := "UDP"
 		tcpProto := "TCP"
-		s.activeProto.Store(&udpProto)
-
-		var (
-			udpActive atomic.Bool
-			// First UDP data send still waiting for any authenticated reply; 0 when none.
-			udpPendingNano atomic.Int64
-		)
-		udpActive.Store(true)
+		s.activeProto.Store(&tcpProto)
 		errCh := make(chan error, 4) // one slot per goroutine below, so none can block
 
 		// Port hopping
@@ -666,50 +652,28 @@ func (s *Session) runConnection(tun io.ReadWriteCloser) error {
 			}()
 		}
 
-		// Failover health monitor & carrier NAT keepalive
+		// UDP path monitor: probes, failover and recovery, carrier NAT keepalive.
 		monitorDone := make(chan struct{})
 		go func() {
-			ticker := time.NewTimer(obsidian.MaintenanceDelay(2 * time.Second))
+			ticker := time.NewTimer(0)
 			defer ticker.Stop()
-			var schedule obsidian.UDPProbeSchedule
 			for {
 				select {
 				case <-ticker.C:
-					ticker.Reset(obsidian.MaintenanceDelay(2 * time.Second))
-					now := time.Now().UnixNano()
-					active := udpActive.Load()
-					authRecv := udpCh.LastAuthRecvNano()
-					// Any authenticated packet after the pending send proves the path is alive, even one Recv skipped.
-					if pending := udpPendingNano.Load(); pending != 0 && authRecv >= pending {
-						udpPendingNano.CompareAndSwap(pending, 0)
-					}
-					var silent time.Duration
-					if pending := udpPendingNano.Load(); active && pending != 0 {
-						silent = time.Duration(now - pending)
-					}
-					everReceived := authRecv > udpStartNano
-					switch DecideUDPHealth(silent, everReceived, active) {
-					case UDPHealthProbe:
+					ticker.Reset(obsidian.MaintenanceDelay(UDPPathTick))
+					probe, change := path.Step(time.Now(), udpCh.LastAuthRecvNano(), udpCh.EchoCount())
+					if probe {
 						_ = udpCh.Send(nil)
-					case UDPHealthFailover, UDPHealthReconnect:
-						udpActive.Store(false)
-						s.activeProto.Store(&tcpProto)
-						udpPendingNano.Store(0)
-					default:
-						if !active {
-							// Space recovery probes independently of health checks.
-							if schedule.Due(time.Unix(0, now), false, authRecv) {
-								_ = udpCh.Send(nil)
-							}
-							if (now - authRecv) < 3*time.Second.Nanoseconds() {
-								udpActive.Store(true)
-								udpPendingNano.Store(0)
-								s.activeProto.Store(&udpProto)
-							}
-						} else if schedule.Due(time.Unix(0, now), true, authRecv) {
-							// Send periodic keepalive to ensure carrier CGNAT pinholes stay open during quiet periods
-							_ = udpCh.Send(nil)
+					}
+					switch change {
+					case UDPPathUp:
+						s.activeProto.Store(&udpProto)
+						if s.debug {
+							log.Printf("[ObsidianClient] UDP data path is up")
 						}
+					case UDPPathDown:
+						s.activeProto.Store(&tcpProto)
+						log.Printf("[ObsidianClient] UDP data path stopped answering, using the TCP tunnel (retry in %v or later)", path.HoldOff())
 					}
 				case <-tunnel.Done():
 					return
@@ -721,7 +685,7 @@ func (s *Session) runConnection(tun io.ReadWriteCloser) error {
 			}
 		}()
 
-		go func() { errCh <- s.copyTunToData(tun, udpCh, tunnel, &udpActive, &tcpProto, &udpPendingNano) }()
+		go func() { errCh <- s.copyTunToData(tun, udpCh, tunnel, path) }()
 		go func() { errCh <- s.copyUDPToTun(udpCh, tun) }()
 		go func() { errCh <- s.copyTunnelToTun(tunnel, tun) }()
 
@@ -758,7 +722,7 @@ func (s *Session) runConnection(tun io.ReadWriteCloser) error {
 	}
 }
 
-func (s *Session) copyTunToData(tun io.ReadWriter, ch *obsidian.UDPChannel, tunnel *obsidian.Tunnel, udpActive *atomic.Bool, tcpProto *string, udpPending *atomic.Int64) error {
+func (s *Session) copyTunToData(tun io.ReadWriter, ch *obsidian.UDPChannel, tunnel *obsidian.Tunnel, path *UDPPath) error {
 	sendBuf := make([]byte, 2048)
 	rejectBuf := make([]byte, obsidian.IPv6RejectBufSize)
 	var udpFailCount atomic.Int32
@@ -786,7 +750,7 @@ func (s *Session) copyTunToData(tun io.ReadWriter, ch *obsidian.UDPChannel, tunn
 				s.rejectIPv6(tun, packet, rejectBuf)
 				continue
 			}
-			if !udpActive.Load() {
+			if !path.Active() {
 				viaTCP = append(viaTCP, packet)
 				continue
 			}
@@ -794,18 +758,14 @@ func (s *Session) copyTunToData(tun io.ReadWriter, ch *obsidian.UDPChannel, tunn
 				if isTemporaryNetworkError(err) {
 					continue
 				}
-				fails := udpFailCount.Add(1)
-				if fails >= 15 {
-					udpActive.Store(false)
-					s.activeProto.Store(tcpProto)
+				if udpFailCount.Add(1) >= 15 {
+					path.Fail()
 				}
 				// Best-effort relay over TCP; packet drop under congestion is standard IP behavior
 				viaTCP = append(viaTCP, packet)
 			} else {
 				udpFailCount.Store(0)
-				if udpPending.Load() == 0 {
-					udpPending.CompareAndSwap(0, time.Now().UnixNano())
-				}
+				path.NoteSent(time.Now().UnixNano())
 			}
 		}
 		viaTCP = obsidian.ThinACKs(viaTCP)

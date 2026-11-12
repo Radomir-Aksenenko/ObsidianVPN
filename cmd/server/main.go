@@ -435,6 +435,11 @@ func main() {
 
 // udpListenHost turns the unspecified IPv4 address into the empty host, which Go binds as a
 // dual-stack socket. A server configured with 0.0.0.0 used to take UDP over IPv4 only.
+// udpDownlinkGrace is how long the server keeps sending downlink over UDP after the client's
+// data moved to the TCP tunnel. It covers packets of one burst that took different paths; any
+// longer and the client's calls go silent while the server sends into a UDP path that is gone.
+const udpDownlinkGrace = 500 * time.Millisecond
+
 func udpListenHost(host string) string {
 	if host == "0.0.0.0" {
 		return ""
@@ -562,12 +567,15 @@ func handleClient(conn net.Conn, priv, pub [obsidian.KeySize]byte,
 		var lastUDPRecv atomic.Int64
 		var lastTCPRecv atomic.Int64
 
-		// Downlink goes over UDP unless only TCP has carried client traffic for 2 s.
+		// Downlink goes over UDP unless the client's data has come over TCP only for
+		// udpDownlinkGrace. A client moves its data to TCP when UDP stops answering, and new
+		// clients send over TCP until UDP has answered, so data on TCP with no UDP data behind
+		// it means UDP does not work for this client. Empty UDP probes do not reach lastUDPRecv.
 		preferTCP := func() bool {
 			lastT := lastTCPRecv.Load()
 			lastU := lastUDPRecv.Load()
 			if lastT > lastU && lastT > 0 {
-				return time.Now().UnixNano()-lastU > 2*time.Second.Nanoseconds()
+				return time.Now().UnixNano()-lastU > udpDownlinkGrace.Nanoseconds()
 			}
 			return false
 		}
